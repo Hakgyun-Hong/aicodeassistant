@@ -1,0 +1,123 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+  <Include href="KnownImageIds.vsct"/>
+
+  <Commands package="guidAIAssistantPackage">
+
+    <Menus>
+      <!-- Top-level "AI Assistant" menu under Tools -->
+      <Menu guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenu" priority="0x0100" type="Menu">
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_TOOLS_OTHER" />
+        <Strings>
+          <ButtonText>AI Assistant</ButtonText>
+        </Strings>
+      </Menu>
+    </Menus>
+
+    <Groups>
+      <!-- Context menu group (right-click in code editor) -->
+      <Group guid="guidAIAssistantPackageCmdSet" id="MyMenuGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN" />
+      </Group>
+
+      <!-- Tools > AI Assistant menu group -->
+      <Group guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenuGroup" priority="0x0100">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenu" />
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <!-- ═══ Context Menu Commands (Right-click in editor) ═══ -->
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="ReviewCodeCommandId" priority="0x0100" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="MyMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="CodeReview" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>🔍 Review Code</ButtonText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="cmdidExplainCodeCommand" priority="0x0101" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="MyMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="UIExplorer" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>📖 Explain Code</ButtonText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="cmdidOptimizeCode" priority="0x0102" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="MyMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="Performance" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>⚡ Optimize Code</ButtonText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="cmdidRefactorCode" priority="0x0103" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="MyMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="Refactoring" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>🔧 Refactor Code</ButtonText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="cmdidGenerateCode" priority="0x0104" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="MyMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="GenerateResource" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>✨ Generate Code</ButtonText>
+        </Strings>
+      </Button>
+
+      <!-- ═══ Tools Menu Commands ═══ -->
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="cmdidOpenChat" priority="0x0100" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="Chat" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>🤖 Open AI Chat</ButtonText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="cmdidSettings" priority="0x0200" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="Settings" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>⚙️ AI Assistant Settings</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <Symbols>
+    <GuidSymbol name="guidAIAssistantPackage" value="{72094a93-38fb-4936-af38-b832374315eb}" />
+
+    <GuidSymbol name="guidAIAssistantPackageCmdSet" value="{5be5d683-76a1-4d14-b6bb-e3aff99d83a9}">
+      <!-- Groups -->
+      <IDSymbol name="MyMenuGroup" value="0x1020" />
+      <IDSymbol name="AIAssistantMenu" value="0x1030" />
+      <IDSymbol name="AIAssistantMenuGroup" value="0x1031" />
+
+      <!-- Context menu commands -->
+      <IDSymbol name="ReviewCodeCommandId" value="0x0100" />
+      <IDSymbol name="cmdidExplainCodeCommand" value="0x1021" />
+      <IDSymbol name="cmdidOptimizeCode" value="0x0103" />
+      <IDSymbol name="cmdidRefactorCode" value="0x0104" />
+      <IDSymbol name="cmdidGenerateCode" value="0x0105" />
+
+      <!-- Tools menu commands -->
+      <IDSymbol name="cmdidOpenChat" value="0x0106" />
+      <IDSymbol name="cmdidSettings" value="0x0107" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>
