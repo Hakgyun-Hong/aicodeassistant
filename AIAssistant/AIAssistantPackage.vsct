@@ -10,7 +10,8 @@
     <Menus>
       <!-- Top-level "AI Assistant" menu under Tools -->
       <Menu guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenu" priority="0x0100" type="Menu">
-        <Parent guid="guidSHLMainMenu" id="IDG_VS_TOOLS_OTHER" />
+        <!-- Changed from IDG_VS_TOOLS_OTHER which was throwing an undefined error -->
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_TOOLS_EXT_TOOLS" />
         <Strings>
           <ButtonText>AI Assistant</ButtonText>
         </Strings>
@@ -77,11 +78,12 @@
         </Strings>
       </Button>
 
-      <!-- ═══ Tools Menu Commands ═══ -->
+      <!-- Tools Menu Commands -->
 
       <Button guid="guidAIAssistantPackageCmdSet" id="cmdidOpenChat" priority="0x0100" type="Button">
         <Parent guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenuGroup" />
-        <Icon guid="ImageCatalogGuid" id="Chat" />
+        <!-- Changed from 'Chat' to 'Comment' because 'Chat' is not a standard KnownImageId -->
+        <Icon guid="ImageCatalogGuid" id="Comment" />
         <CommandFlag>IconIsMoniker</CommandFlag>
         <Strings>
           <ButtonText>🤖 Open AI Chat</ButtonText>
