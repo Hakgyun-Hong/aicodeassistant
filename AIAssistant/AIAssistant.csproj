@@ -53,6 +53,7 @@
     <Compile Include="AssistantConfig.cs" />
     <Compile Include="ChatToolWindow.cs" />
     <Compile Include="ChatToolWindowPanel.cs" />
+    <Compile Include="CodeReviewDialog.cs" />
     <Compile Include="ExplainCodeCommand.cs" />
     <Compile Include="GenerateCodeCommand.cs" />
     <Compile Include="Helper.cs" />

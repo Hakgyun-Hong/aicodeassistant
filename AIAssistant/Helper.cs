@@ -66,7 +66,7 @@ Provide:
 3. Expected performance improvement
 
 Return the complete optimized code in a code block, followed by explanations.";
-            await ExecuteCodeActionAsync(prompt, "Optimize Code");
+            await ExecuteCodeActionWithApprovalAsync(prompt, "Optimize Code");
         }
 
         internal static async Task RefactorSelectedCodeAsync()
@@ -78,7 +78,7 @@ Provide:
 3. Design patterns applied (if any)
 
 Return the complete refactored code in a code block, followed by explanations.";
-            await ExecuteCodeActionAsync(prompt, "Refactor Code");
+            await ExecuteCodeActionWithApprovalAsync(prompt, "Refactor Code");
         }
 
         internal static async Task GenerateCodeAsync()
@@ -114,14 +114,29 @@ Follow best practices for the language. Include comments. Return only the code i
 
             var response = await LlmClient.AskAsync(systemPrompt, userContent);
 
-            ShowInOutputWindow($"📝 Generated Code:\n{response}");
-            DteInstance.StatusBar.Text = "AI Assistant: Code generated. See Output window.";
+            // Show approval dialog for generated code
+            var dialog = new CodeReviewDialog("Generate Code", $"// Description: {description}", response);
+            if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK && dialog.Accepted)
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                InsertTextAtCursor(dialog.ProposedCode);
+                DteInstance.StatusBar.Text = "AI Assistant: Generated code inserted.";
+                ShowInOutputWindow($"✅ Generated code accepted and inserted.\n");
+            }
+            else
+            {
+                DteInstance.StatusBar.Text = "AI Assistant: Code generation rejected.";
+                ShowInOutputWindow($"❌ Generated code rejected by user.\n");
+            }
         }
 
         #endregion
 
-        #region Core Execution
+        #region Core Execution (with Approval)
 
+        /// <summary>
+        /// Execute a code action that shows results in the Output Window only (Review, Explain).
+        /// </summary>
         private static async Task ExecuteCodeActionAsync(string systemPrompt, string actionName)
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
@@ -147,7 +162,49 @@ Follow best practices for the language. Include comments. Return only the code i
             DteInstance.StatusBar.Text = $"AI Assistant: {actionName} completed.";
         }
 
-        #endregion
+        /// <summary>
+        /// Execute a code action that shows an approval dialog before applying changes (Optimize, Refactor).
+        /// </summary>
+        private static async Task ExecuteCodeActionWithApprovalAsync(string systemPrompt, string actionName)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            var selectedText = GetSelectedText();
+            if (string.IsNullOrWhiteSpace(selectedText))
+            {
+                DteInstance.StatusBar.Text = "No code selected. Please select code first.";
+                return;
+            }
+
+            string fileName = GetActiveFileName();
+            string fileInfo = !string.IsNullOrEmpty(fileName) ? $" (from {fileName})" : "";
+
+            var userContent = $"```\n{selectedText}\n```";
+
+            ShowInOutputWindow($"🔄 {actionName}{fileInfo}...\n");
+            DteInstance.StatusBar.Text = $"AI Assistant: {actionName} in progress...";
+
+            var response = await LlmClient.AskAsync(systemPrompt, userContent);
+
+            // Show the approval dialog
+            var dialog = new CodeReviewDialog(actionName, selectedText, response);
+            if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK && dialog.Accepted)
+            {
+                // Replace selected code with proposed code
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (DteInstance?.ActiveDocument?.Selection is EnvDTE.TextSelection textSelection)
+                {
+                    textSelection.Insert(dialog.ProposedCode);
+                }
+                DteInstance.StatusBar.Text = $"AI Assistant: {actionName} applied.";
+                ShowInOutputWindow($"✅ {actionName} accepted and applied{fileInfo}.\n");
+            }
+            else
+            {
+                DteInstance.StatusBar.Text = $"AI Assistant: {actionName} rejected.";
+                ShowInOutputWindow($"❌ {actionName} rejected by user{fileInfo}.\n");
+            }
+        }
 
         #region Chat with Context
 
