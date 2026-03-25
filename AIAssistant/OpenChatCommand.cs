@@ -35,10 +35,9 @@ namespace AIAssistant
             package.JoinableTaskFactory.RunAsync(async () =>
             {
                 var window = await package.ShowToolWindowAsync(typeof(ChatToolWindow), 0, true, package.DisposalToken);
-                if (window == null || window.Frame == null)
-                {
-                    throw new NotSupportedException("Cannot create AI Chat tool window");
-                }
+                await package.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var windowFrame = (Microsoft.VisualStudio.Shell.Interop.IVsWindowFrame)window.Frame;
+                Microsoft.VisualStudio.ErrorHandler.ThrowOnFailure(windowFrame.Show());
             });
         }
     }
