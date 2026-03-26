@@ -38,9 +38,14 @@ namespace AIAssistant
         private List<KeyValuePair<string, string>> chatHistory = new List<KeyValuePair<string, string>>();
         private string lastAssistantResponse = "";
         
+        // Tracks the original code that the user sent as context, used for CodeReviewDialog
+        private string lastOriginalCodeContext = "";
+        private string lastOriginalFileName = "";
+        
         // Attached files for context
         private List<string> attachedFiles = new List<string>();
         private FlowLayoutPanel attachmentPanel;
+        private Button btnApplyChanges;
 
         public ChatToolWindowPanel()
         {
@@ -139,9 +144,14 @@ namespace AIAssistant
             btnInsertCode = CreateSmallButton("⬇️ Insert Last Code", Color.FromArgb(80, 80, 80));
             btnInsertCode.Click += BtnInsertCode_Click;
 
+            btnApplyChanges = CreateSmallButton("✅ Review & Apply Changes", Color.FromArgb(106, 153, 85));
+            btnApplyChanges.Click += BtnApplyChanges_Click;
+            btnApplyChanges.Visible = false; // Hidden until AI responds with code
+
             contextRow.Controls.Add(btnSendWithCode);
             contextRow.Controls.Add(btnSendWithFile);
             contextRow.Controls.Add(btnInsertCode);
+            contextRow.Controls.Add(btnApplyChanges);
 
             // Input + Send row
             var inputRow = new Panel
@@ -345,7 +355,20 @@ namespace AIAssistant
             string displayMessage = userMessage;
             string contextMessage = userMessage;
 
-            // Bundle attached files
+            // Capture the original code context for later approval dialog
+            string capturedOriginalCode = "";
+            string capturedFileName = "";
+            if (includeSelectedCode)
+            {
+                ThreadHelper.JoinableTaskFactory.Run(async () =>
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    capturedOriginalCode = Helper.GetSelectedText();
+                    capturedFileName = Helper.GetActiveFileName() ?? "";
+                });
+            }
+
+            // Bundle attached files (also capture first file content as original context)
             if (attachedFiles.Count > 0)
             {
                 foreach (string file in attachedFiles)
@@ -360,6 +383,13 @@ namespace AIAssistant
                         contextMessage += $"\n\nAttached File ({fileName}):\n```{extension}\n{content}\n```\n";
                         
                         displayMessage += $"\n[📎 Attached: {fileName}]";
+
+                        // Use first attached file as original context for approval
+                        if (string.IsNullOrEmpty(capturedOriginalCode))
+                        {
+                            capturedOriginalCode = content;
+                            capturedFileName = fileName;
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -387,7 +417,30 @@ namespace AIAssistant
 
                     this.Invoke((Action)(() =>
                     {
+                        // Save original context for the approval dialog
+                        lastOriginalCodeContext = capturedOriginalCode;
+                        lastOriginalFileName = capturedFileName;
+
                         AppendMessage("AI Assistant", response, ASSISTANT_BG);
+
+                        // Auto-detect code blocks and show/hide the Apply button
+                        bool hasCodeBlock = Regex.IsMatch(response, @"```\w*\s*\n[\s\S]*?```");
+                        btnApplyChanges.Visible = hasCodeBlock;
+
+                        // If we had original code context AND AI responded with code, notify user
+                        if (hasCodeBlock && !string.IsNullOrEmpty(lastOriginalCodeContext))
+                        {
+                            AppendMessage("System", 
+                                "💡 Code changes detected. Click [✅ Review & Apply Changes] to review and apply, or [⬇️ Insert Last Code] to insert at cursor.", 
+                                Color.FromArgb(79, 193, 255));
+                        }
+                        else if (hasCodeBlock)
+                        {
+                            AppendMessage("System", 
+                                "💡 Code block detected. Click [⬇️ Insert Last Code] to insert at cursor, or [✅ Review & Apply Changes] to review.", 
+                                Color.FromArgb(79, 193, 255));
+                        }
+
                         UpdateTokenCount();
                         chatInput.Enabled = true;
                         btnSend.Enabled = true;
@@ -488,6 +541,67 @@ namespace AIAssistant
             });
 
             AppendMessage("System", "✅ Code inserted at cursor position.", SUCCESS);
+        }
+
+        /// <summary>
+        /// Shows the CodeReviewDialog for the last AI response.
+        /// If original code context exists, shows side-by-side diff.
+        /// If accepted, replaces the selected text or inserts at cursor.
+        /// </summary>
+        private void BtnApplyChanges_Click(object sender, EventArgs e)
+        {
+            if (string.IsNullOrEmpty(lastAssistantResponse)) return;
+
+            string originalCode = lastOriginalCodeContext;
+            if (string.IsNullOrEmpty(originalCode))
+            {
+                // No original context — try to grab current selection
+                ThreadHelper.JoinableTaskFactory.Run(async () =>
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    originalCode = Helper.GetSelectedText();
+                    lastOriginalFileName = Helper.GetActiveFileName() ?? "";
+                });
+
+                if (string.IsNullOrEmpty(originalCode))
+                {
+                    originalCode = "(No original code — select code in editor first, or use 'Send with Selected Code')";
+                }
+            }
+
+            string actionName = string.IsNullOrEmpty(lastOriginalFileName) 
+                ? "Chat Code Changes" 
+                : $"Changes to {lastOriginalFileName}";
+
+            var dialog = new CodeReviewDialog(actionName, originalCode, lastAssistantResponse);
+            if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK && dialog.Accepted)
+            {
+                ThreadHelper.JoinableTaskFactory.Run(async () =>
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    
+                    // If there's selected text, replace it. Otherwise insert at cursor.
+                    string selectedText = Helper.GetSelectedText();
+                    if (!string.IsNullOrWhiteSpace(selectedText))
+                    {
+                        if (Helper.DteInstance?.ActiveDocument?.Selection is EnvDTE.TextSelection textSel)
+                        {
+                            textSel.Insert(dialog.ProposedCode);
+                        }
+                    }
+                    else
+                    {
+                        Helper.InsertTextAtCursor(dialog.ProposedCode);
+                    }
+                });
+
+                AppendMessage("System", "✅ Changes accepted and applied to editor.", SUCCESS);
+                btnApplyChanges.Visible = false;
+            }
+            else
+            {
+                AppendMessage("System", "❌ Changes rejected.", Color.FromArgb(241, 76, 76));
+            }
         }
 
         #endregion

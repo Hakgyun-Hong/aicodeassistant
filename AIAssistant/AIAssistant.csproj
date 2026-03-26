@@ -63,6 +63,7 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="AIAssistantPackage.cs" />
     <Compile Include="RefactorCodeCommand.cs" />
+    <Compile Include="ResponseViewDialog.cs" />
     <Compile Include="ReviewCodeCommand.cs" />
     <Compile Include="SettingsCommand.cs" />
     <Compile Include="SettingsDialog.cs" />

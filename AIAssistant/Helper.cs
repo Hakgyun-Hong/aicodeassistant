@@ -135,7 +135,7 @@ Follow best practices for the language. Include comments. Return only the code i
         #region Core Execution (with Approval)
 
         /// <summary>
-        /// Execute a code action that shows results in the Output Window only (Review, Explain).
+        /// Execute a code action that shows results in a styled HTML viewer (Review, Explain).
         /// </summary>
         private static async Task ExecuteCodeActionAsync(string systemPrompt, string actionName)
         {
@@ -158,7 +158,11 @@ Follow best practices for the language. Include comments. Return only the code i
 
             var response = await LlmClient.AskAsync(systemPrompt, userContent);
 
-            ShowInOutputWindow($"═══ {actionName} Result{fileInfo} ═══\n\n{response}");
+            // Show in the HTML response viewer
+            string promptInfo = $"{actionName}{fileInfo}\n\n{selectedText}";
+            var viewer = new ResponseViewDialog(actionName, promptInfo, response);
+            viewer.Show();
+
             DteInstance.StatusBar.Text = $"AI Assistant: {actionName} completed.";
         }
 
