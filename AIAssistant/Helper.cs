@@ -32,53 +32,22 @@ namespace AIAssistant
 
         internal static async Task ReviewSelectedCodeAsync()
         {
-            var prompt = @"You are an expert code reviewer. Review the following code thoroughly.
-Provide:
-1. Potential bugs or issues
-2. Code quality improvements
-3. Performance suggestions
-4. Security concerns (if any)
-5. Best practice violations
-
-Be concise but thorough. Use bullet points.";
-            await ExecuteCodeActionAsync(prompt, "Review Code");
+            await ExecuteCodeActionAsync(PromptConfig.Instance.ReviewPrompt, "Review Code");
         }
 
         internal static async Task ExplainSelectedCodeAsync()
         {
-            var prompt = @"You are an expert programmer. Explain the following code in detail.
-Provide:
-1. Overall purpose of the code
-2. Step-by-step breakdown of the logic
-3. Key data structures and algorithms used
-4. Any notable patterns or techniques
-
-Be clear and educational.";
-            await ExecuteCodeActionAsync(prompt, "Explain Code");
+            await ExecuteCodeActionAsync(PromptConfig.Instance.ExplainPrompt, "Explain Code");
         }
 
         internal static async Task OptimizeSelectedCodeAsync()
         {
-            var prompt = @"You are a performance optimization expert. Optimize the following code.
-Provide:
-1. The optimized version of the code
-2. Explanation of each optimization
-3. Expected performance improvement
-
-Return the complete optimized code in a code block, followed by explanations.";
-            await ExecuteCodeActionWithApprovalAsync(prompt, "Optimize Code");
+            await ExecuteCodeActionWithApprovalAsync(PromptConfig.Instance.OptimizePrompt, "Optimize Code");
         }
 
         internal static async Task RefactorSelectedCodeAsync()
         {
-            var prompt = @"You are a refactoring expert. Refactor the following code for better readability, maintainability, and adherence to SOLID principles.
-Provide:
-1. The refactored code
-2. Explanation of refactoring decisions
-3. Design patterns applied (if any)
-
-Return the complete refactored code in a code block, followed by explanations.";
-            await ExecuteCodeActionWithApprovalAsync(prompt, "Refactor Code");
+            await ExecuteCodeActionWithApprovalAsync(PromptConfig.Instance.RefactorPrompt, "Refactor Code");
         }
 
         internal static async Task GenerateCodeAsync()
@@ -104,8 +73,7 @@ Return the complete refactored code in a code block, followed by explanations.";
                 fileContext = $"\nActive file: {activeFile}";
             }
 
-            var systemPrompt = @"You are an expert code generator. Generate clean, well-documented code based on the user's description.
-Follow best practices for the language. Include comments. Return only the code in a code block.";
+            var systemPrompt = PromptConfig.Instance.GeneratePrompt;
 
             var userContent = $"Generate the following code:{fileContext}\n\nDescription: {description}";
 

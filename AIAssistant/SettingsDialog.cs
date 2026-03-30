@@ -38,7 +38,7 @@ namespace AIAssistant
         {
             this.Text = "AI Assistant Settings";
             this.Width = 560;
-            this.Height = 520;
+            this.Height = 560;
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -132,16 +132,25 @@ namespace AIAssistant
             lblStatus.Font = new Font("Segoe UI", 9f);
             this.Controls.Add(lblStatus);
 
+            // Edit Prompts button (links to PromptConfigDialog)
+            var btnEditPrompts = CreateButton("📝 Edit Prompts", 20, y - 3, 140, Color.FromArgb(79, 60, 120));
+            btnEditPrompts.Click += (s, e) =>
+            {
+                var promptDialog = new PromptConfigDialog();
+                promptDialog.ShowDialog();
+            };
+            this.Controls.Add(btnEditPrompts);
+
             // Buttons
-            var btnSave = CreateButton("💾 Save", 240, y - 3, 90, SUCCESS);
+            var btnSave = CreateButton("💾 Save", 270, y - 3, 80, SUCCESS);
             btnSave.Click += BtnSave_Click;
             this.Controls.Add(btnSave);
 
-            var btnLoad = CreateButton("📂 Load", 340, y - 3, 90, ACCENT);
+            var btnLoad = CreateButton("📂 Load", 360, y - 3, 80, ACCENT);
             btnLoad.Click += BtnLoad_Click;
             this.Controls.Add(btnLoad);
 
-            var btnReset = CreateButton("🔄 Reset", 440, y - 3, 80, BORDER);
+            var btnReset = CreateButton("🔄 Reset", 450, y - 3, 70, BORDER);
             btnReset.Click += BtnReset_Click;
             this.Controls.Add(btnReset);
         }

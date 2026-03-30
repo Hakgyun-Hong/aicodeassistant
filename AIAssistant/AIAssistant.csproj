@@ -60,6 +60,8 @@
     <Compile Include="LlmClient.cs" />
     <Compile Include="OpenChatCommand.cs" />
     <Compile Include="OptimizeCodeCommand.cs" />
+    <Compile Include="PromptConfig.cs" />
+    <Compile Include="PromptConfigDialog.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="AIAssistantPackage.cs" />
     <Compile Include="RefactorCodeCommand.cs" />
