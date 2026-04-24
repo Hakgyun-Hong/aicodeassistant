@@ -323,6 +323,7 @@ namespace AIAssistant
             var lines = markdown.Replace("\r\n", "\n").Split('\n');
             bool inCodeBlock = false;
             bool inList = false;
+            bool inTable = false;
             string codeBlockLang = "";
 
             for (int i = 0; i < lines.Length; i++)
@@ -359,31 +360,83 @@ namespace AIAssistant
                 if (string.IsNullOrWhiteSpace(line))
                 {
                     if (inList) { sb.Append("</ul>"); inList = false; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     continue;
+                }
+
+                // Table support
+                if (Regex.IsMatch(line.TrimStart(), @"^\|.*\|$"))
+                {
+                    if (!inTable)
+                    {
+                        if (inList) { sb.Append("</ul>"); inList = false; }
+                        sb.Append("<table>");
+                        inTable = true;
+                    }
+
+                    // Separator row (e.g. |---|---|)
+                    if (Regex.IsMatch(line, @"^[\s\|\-:]+$") && line.Contains("-"))
+                    {
+                        continue;
+                    }
+
+                    // Look ahead for header
+                    bool isHeader = false;
+                    if (i + 1 < lines.Length)
+                    {
+                        string nextLine = lines[i + 1].TrimStart();
+                        if (Regex.IsMatch(nextLine, @"^[\s\|\-:]+$") && nextLine.Contains("-") && nextLine.Contains("|"))
+                        {
+                            isHeader = true;
+                        }
+                    }
+
+                    string stripped = line.Trim();
+                    if (stripped.StartsWith("|")) stripped = stripped.Substring(1);
+                    if (stripped.EndsWith("|")) stripped = stripped.Substring(0, stripped.Length - 1);
+                    
+                    sb.Append("<tr>");
+                    string[] cells = stripped.Split('|');
+                    foreach (var cell in cells)
+                    {
+                        string tag = isHeader ? "th" : "td";
+                        sb.Append($"<{tag}>{InlineFormat(cell.Trim())}</{tag}>");
+                    }
+                    sb.Append("</tr>");
+                    continue;
+                }
+                else if (inTable)
+                {
+                    sb.Append("</table>");
+                    inTable = false;
                 }
 
                 // Headers
                 if (line.StartsWith("####"))
                 {
                     if (inList) { sb.Append("</ul>"); inList = false; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     sb.Append($"<h4>{InlineFormat(line.Substring(4).Trim())}</h4>");
                     continue;
                 }
                 if (line.StartsWith("###"))
                 {
                     if (inList) { sb.Append("</ul>"); inList = false; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     sb.Append($"<h3>{InlineFormat(line.Substring(3).Trim())}</h3>");
                     continue;
                 }
                 if (line.StartsWith("##"))
                 {
                     if (inList) { sb.Append("</ul>"); inList = false; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     sb.Append($"<h2>{InlineFormat(line.Substring(2).Trim())}</h2>");
                     continue;
                 }
                 if (line.StartsWith("#"))
                 {
                     if (inList) { sb.Append("</ul>"); inList = false; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     sb.Append($"<h1>{InlineFormat(line.Substring(1).Trim())}</h1>");
                     continue;
                 }
@@ -392,6 +445,7 @@ namespace AIAssistant
                 if (Regex.IsMatch(line.Trim(), @"^[-*_]{3,}$"))
                 {
                     if (inList) { sb.Append("</ul>"); inList = false; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     sb.Append("<hr/>");
                     continue;
                 }
@@ -401,6 +455,7 @@ namespace AIAssistant
                 if (numMatch.Success)
                 {
                     if (!inList) { sb.Append("<ul>"); inList = true; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     sb.Append($"<li><strong>{numMatch.Groups[1].Value}.</strong> {InlineFormat(numMatch.Groups[2].Value)}</li>");
                     continue;
                 }
@@ -410,6 +465,7 @@ namespace AIAssistant
                 if (bulletMatch.Success)
                 {
                     if (!inList) { sb.Append("<ul>"); inList = true; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     sb.Append($"<li>{InlineFormat(bulletMatch.Groups[1].Value)}</li>");
                     continue;
                 }
@@ -418,17 +474,20 @@ namespace AIAssistant
                 if (line.TrimStart().StartsWith(">"))
                 {
                     if (inList) { sb.Append("</ul>"); inList = false; }
+                    if (inTable) { sb.Append("</table>"); inTable = false; }
                     sb.Append($"<blockquote>{InlineFormat(line.TrimStart().Substring(1).Trim())}</blockquote>");
                     continue;
                 }
 
                 // Normal paragraph
                 if (inList) { sb.Append("</ul>"); inList = false; }
+                if (inTable) { sb.Append("</table>"); inTable = false; }
                 sb.Append($"<p>{InlineFormat(line)}</p>");
             }
 
             if (inCodeBlock) sb.Append("</code></pre>");
             if (inList) sb.Append("</ul>");
+            if (inTable) sb.Append("</table>");
 
             return sb.ToString();
         }

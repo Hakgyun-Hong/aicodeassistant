@@ -69,6 +69,14 @@
     <Compile Include="ReviewCodeCommand.cs" />
     <Compile Include="SettingsCommand.cs" />
     <Compile Include="SettingsDialog.cs" />
+    <Compile Include="WarningAnalysisQueue.cs" />
+    <Compile Include="WarningCollector.cs" />
+    <Compile Include="WarningFixApplier.cs" />
+    <Compile Include="WarningTodoItem.cs" />
+    <Compile Include="WarningTodoPanel.cs" />
+    <Compile Include="WarningTodoStore.cs" />
+    <Compile Include="WarningTodoToolWindow.cs" />
+    <Compile Include="OpenWarningTodoCommand.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="source.extension.vsixmanifest">

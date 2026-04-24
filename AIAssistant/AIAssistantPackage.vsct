@@ -98,6 +98,15 @@
           <ButtonText>⚙️ AI Assistant Settings</ButtonText>
         </Strings>
       </Button>
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="cmdidOpenWarningTodo" priority="0x0300" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="StatusWarning" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>⚠️ Warning Fix Assistant</ButtonText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -120,6 +129,7 @@
       <!-- Tools menu commands -->
       <IDSymbol name="cmdidOpenChat" value="0x0106" />
       <IDSymbol name="cmdidSettings" value="0x0107" />
+      <IDSymbol name="cmdidOpenWarningTodo" value="0x0108" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

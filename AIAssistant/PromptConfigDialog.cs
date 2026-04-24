@@ -24,6 +24,7 @@ namespace AIAssistant
         private TextBox txtOptimize;
         private TextBox txtRefactor;
         private TextBox txtGenerate;
+        private TextBox txtWarningFix;
         private Label lblStatus;
 
         public PromptConfigDialog()
@@ -88,6 +89,7 @@ namespace AIAssistant
             txtOptimize = CreatePromptTab("⚡ Optimize", "Optimize Code");
             txtRefactor = CreatePromptTab("🔧 Refactor", "Refactor Code");
             txtGenerate = CreatePromptTab("✨ Generate", "Generate Code");
+            txtWarningFix = CreatePromptTab("⚠️ Warning Fix", "Warning Fix");
 
             // Bottom button bar
             var footer = new Panel
@@ -227,6 +229,7 @@ namespace AIAssistant
             txtOptimize.Text = pc.OptimizePrompt ?? "";
             txtRefactor.Text = pc.RefactorPrompt ?? "";
             txtGenerate.Text = pc.GeneratePrompt ?? "";
+            txtWarningFix.Text = pc.WarningFixPrompt ?? "";
         }
 
         private void SaveFromUI()
@@ -237,6 +240,7 @@ namespace AIAssistant
             pc.OptimizePrompt = txtOptimize.Text;
             pc.RefactorPrompt = txtRefactor.Text;
             pc.GeneratePrompt = txtGenerate.Text;
+            pc.WarningFixPrompt = txtWarningFix.Text;
         }
 
         private Button CreateButton(string text, Color bgColor)

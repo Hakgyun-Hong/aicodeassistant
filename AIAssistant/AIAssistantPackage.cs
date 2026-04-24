@@ -14,6 +14,7 @@ namespace AIAssistant
     [Guid(AIAssistantPackage.PackageGuidString)]
     [ProvideMenuResource("Menus.ctmenu", 1)]
     [ProvideToolWindow(typeof(ChatToolWindow), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057")]
+    [ProvideToolWindow(typeof(WarningTodoToolWindow), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057")]
     public sealed class AIAssistantPackage : AsyncPackage
     {
         public const string PackageGuidString = "72094a93-38fb-4936-af38-b832374315eb";
@@ -36,6 +37,7 @@ namespace AIAssistant
             await GenerateCodeCommand.InitializeAsync(this);
             await OpenChatCommand.InitializeAsync(this);
             await SettingsCommand.InitializeAsync(this);
+            await OpenWarningTodoCommand.InitializeAsync(this);
         }
     }
 }

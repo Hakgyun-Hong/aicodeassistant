@@ -41,6 +41,8 @@ namespace AIAssistant
         // Tracks the original code that the user sent as context, used for CodeReviewDialog
         private string lastOriginalCodeContext = "";
         private string lastOriginalFileName = "";
+        private EnvDTE.EditPoint lastOriginalStartPoint = null;
+        private EnvDTE.EditPoint lastOriginalEndPoint = null;
         
         // Attached files for context
         private List<string> attachedFiles = new List<string>();
@@ -358,6 +360,9 @@ namespace AIAssistant
             // Capture the original code context for later approval dialog
             string capturedOriginalCode = "";
             string capturedFileName = "";
+            EnvDTE.EditPoint startPoint = null;
+            EnvDTE.EditPoint endPoint = null;
+
             if (includeSelectedCode)
             {
                 ThreadHelper.JoinableTaskFactory.Run(async () =>
@@ -365,6 +370,13 @@ namespace AIAssistant
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     capturedOriginalCode = Helper.GetSelectedText();
                     capturedFileName = Helper.GetActiveFileName() ?? "";
+                    
+                    // Capture exact selection range to ensure reliable replacement later
+                    if (Helper.DteInstance?.ActiveDocument?.Selection is EnvDTE.TextSelection textSel)
+                    {
+                        startPoint = textSel.TopPoint.CreateEditPoint();
+                        endPoint = textSel.BottomPoint.CreateEditPoint();
+                    }
                 });
             }
 
@@ -420,6 +432,8 @@ namespace AIAssistant
                         // Save original context for the approval dialog
                         lastOriginalCodeContext = capturedOriginalCode;
                         lastOriginalFileName = capturedFileName;
+                        lastOriginalStartPoint = startPoint;
+                        lastOriginalEndPoint = endPoint;
 
                         AppendMessage("AI Assistant", response, ASSISTANT_BG);
 
@@ -580,22 +594,60 @@ namespace AIAssistant
                 {
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     
-                    // If there's selected text, replace it. Otherwise insert at cursor.
-                    string selectedText = Helper.GetSelectedText();
-                    if (!string.IsNullOrWhiteSpace(selectedText))
+                    if (lastOriginalStartPoint != null && lastOriginalEndPoint != null)
                     {
-                        if (Helper.DteInstance?.ActiveDocument?.Selection is EnvDTE.TextSelection textSel)
+                        // 1. We have exact coordinates from the original selection. Replace exactly what was selected!
+                        try
+                        {
+                            lastOriginalStartPoint.ReplaceText(lastOriginalEndPoint, dialog.ProposedCode, 0);
+                        }
+                        catch
+                        {
+                            // Fallback if EditPoint became invalid (e.g. document closed)
+                            Helper.InsertTextAtCursor(dialog.ProposedCode);
+                        }
+                    }
+                    else if (Helper.DteInstance?.ActiveDocument == null || string.IsNullOrEmpty(lastOriginalFileName))
+                    {
+                        // 2. Either no file is open, or the chat wasn't initiated from a specific file selection.
+                        // Let's create a new file for the generated code.
+                        Helper.DteInstance?.ItemOperations.NewFile("General\\Text File");
+                        var activeDoc = Helper.DteInstance?.ActiveDocument;
+                        if (activeDoc?.Selection is EnvDTE.TextSelection textSel)
                         {
                             textSel.Insert(dialog.ProposedCode);
+                            // Try to guess a filename if the first line is exactly e.g. // MyClass.cs (not perfect but helpful)
+                            var match = Regex.Match(dialog.ProposedCode, @"^\s*//\s*([a-zA-Z0-9_\-\.]+\.(cs|js|py|html|css|txt|md|cpp|h|xml|json))");
+                            if (match.Success)
+                            {
+                                AppendMessage("System", $"✅ Code applied to a new file. You can save it as '{match.Groups[1].Value}'.", SUCCESS);
+                            }
+                            else
+                            {
+                                AppendMessage("System", "✅ Code applied to a new file.", SUCCESS);
+                            }
                         }
                     }
                     else
                     {
-                        Helper.InsertTextAtCursor(dialog.ProposedCode);
+                        // 3. We are in an active document but no original selection was tracked.
+                        // Just insert at cursor or replace current selection.
+                        string selectedText = Helper.GetSelectedText();
+                        if (!string.IsNullOrWhiteSpace(selectedText))
+                        {
+                            if (Helper.DteInstance?.ActiveDocument?.Selection is EnvDTE.TextSelection textSel)
+                            {
+                                textSel.Insert(dialog.ProposedCode);
+                            }
+                        }
+                        else
+                        {
+                            Helper.InsertTextAtCursor(dialog.ProposedCode);
+                        }
+                        AppendMessage("System", "✅ Changes applied to active document.", SUCCESS);
                     }
                 });
 
-                AppendMessage("System", "✅ Changes accepted and applied to editor.", SUCCESS);
                 btnApplyChanges.Visible = false;
             }
             else

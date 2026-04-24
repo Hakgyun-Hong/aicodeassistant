@@ -31,6 +31,9 @@ namespace AIAssistant
         [DataMember(Name = "generatePrompt")]
         public string GeneratePrompt { get; set; }
 
+        [DataMember(Name = "warningFixPrompt")]
+        public string WarningFixPrompt { get; set; }
+
         public static PromptConfig Instance
         {
             get
@@ -93,6 +96,20 @@ Return the complete refactored code in a code block, followed by explanations.";
 
             GeneratePrompt = @"You are an expert code generator. Generate clean, well-documented code based on the user's description.
 Follow best practices for the language. Include comments. Return only the code in a code block.";
+
+            WarningFixPrompt = @"You are a senior code reviewer specializing in fixing compiler warnings.
+Your job is to propose the smallest safe fix for the given warning.
+Do not rewrite unrelated code.
+Do not change public APIs unless necessary.
+Do not hide warnings with #pragma, <NoWarn>, or null-forgiving operator (!) unless explicitly justified.
+Return JSON only with these exact fields:
+- canFix (bool)
+- summary (string, one-line description)
+- explanation (string, detailed reasoning)
+- originalSnippet (string, exact lines to replace)
+- proposedSnippet (string, replacement code)
+- unifiedDiff (string, unified diff format)
+- riskLevel (string: Low, Medium, or High)";
         }
 
         #region Save / Load
