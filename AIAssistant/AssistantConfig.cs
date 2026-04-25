@@ -36,6 +36,20 @@ namespace AIAssistant
         [DataMember(Name = "maxThinkingLength")]
         public int MaxThinkingLength { get; set; } = 5000;
 
+        // --- Warning Fix Assistant Settings ---
+
+        [DataMember(Name = "enableWarningFixAssistant")]
+        public bool EnableWarningFixAssistant { get; set; } = true;
+
+        [DataMember(Name = "showWarningPromptOnBuild")]
+        public bool ShowWarningPromptOnBuild { get; set; } = true;
+
+        [DataMember(Name = "autoAnalyzeWarnings")]
+        public bool AutoAnalyzeWarnings { get; set; } = false;
+
+        [DataMember(Name = "maxWarningsToAnalyze")]
+        public int MaxWarningsToAnalyze { get; set; } = 10;
+
         public static AssistantConfig Instance
         {
             get
@@ -117,6 +131,11 @@ namespace AIAssistant
             TimeoutSeconds = 500;
             ShowThinking = false;
             MaxThinkingLength = 5000;
+
+            EnableWarningFixAssistant = true;
+            ShowWarningPromptOnBuild = true;
+            AutoAnalyzeWarnings = false;
+            MaxWarningsToAnalyze = 10;
         }
 
         private static string PrettyPrintJson(string json)

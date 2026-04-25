@@ -28,6 +28,12 @@ namespace AIAssistant
         private NumericUpDown numMaxThinkingLength;
         private Label lblStatus;
 
+        // Warning Options
+        private CheckBox chkEnableWarningAssistant;
+        private CheckBox chkPromptOnBuild;
+        private CheckBox chkAutoAnalyze;
+        private ComboBox cmbMaxWarnings;
+
         public SettingsDialog()
         {
             InitializeUI();
@@ -37,8 +43,8 @@ namespace AIAssistant
         private void InitializeUI()
         {
             this.Text = "AI Assistant Settings";
-            this.Width = 560;
-            this.Height = 560;
+            this.Width = 600;
+            this.Height = 750;
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -123,8 +129,60 @@ namespace AIAssistant
             y += 40;
 
             // Separator
-            var sep3 = CreateSeparator(20, y, 500);
+            var sep3 = CreateSeparator(20, y, 550);
             this.Controls.Add(sep3);
+            y += 15;
+
+            // --- Warning Fix Assistant Section ---
+            var warningTitle = CreateLabel("⚠️ Warning Fix Automation", 20, y, 500);
+            warningTitle.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
+            warningTitle.ForeColor = WARNING;
+            this.Controls.Add(warningTitle);
+            y += 35;
+
+            chkEnableWarningAssistant = new CheckBox { Text = "Enable Warning Fix Assistant", Left = 20, Top = y, Width = 500, ForeColor = FG, FlatStyle = FlatStyle.Flat };
+            this.Controls.Add(chkEnableWarningAssistant);
+            y += 30;
+
+            chkPromptOnBuild = new CheckBox { Text = "Prompt me to analyze warnings after build finishes", Left = 40, Top = y, Width = 500, ForeColor = FG, FlatStyle = FlatStyle.Flat };
+            this.Controls.Add(chkPromptOnBuild);
+            y += 30;
+
+            chkAutoAnalyze = new CheckBox { Text = "Auto-analyze warnings without prompting (silent start)", Left = 40, Top = y, Width = 500, ForeColor = FG, FlatStyle = FlatStyle.Flat };
+            this.Controls.Add(chkAutoAnalyze);
+            y += 30;
+
+            this.Controls.Add(CreateLabel("Max auto-analyzed warnings:", 40, y + 3, labelWidth + 30));
+            cmbMaxWarnings = new ComboBox { Left = 240, Top = y, Width = 100, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BG2, ForeColor = FG, FlatStyle = FlatStyle.Flat };
+            cmbMaxWarnings.Items.AddRange(new object[] { "1", "3", "5", "10", "20", "50", "100" });
+            this.Controls.Add(cmbMaxWarnings);
+            var mwNote = CreateLabel("(Safety limit for legacy projects)", 350, y + 3, 220);
+            mwNote.ForeColor = Color.FromArgb(157, 160, 166);
+            mwNote.Font = new Font("Segoe UI", 8f);
+            this.Controls.Add(mwNote);
+            y += 40;
+
+            // Interlocking logic
+            chkEnableWarningAssistant.CheckedChanged += (s, e) =>
+            {
+                chkPromptOnBuild.Enabled = chkEnableWarningAssistant.Checked;
+                chkAutoAnalyze.Enabled = chkEnableWarningAssistant.Checked;
+                cmbMaxWarnings.Enabled = chkEnableWarningAssistant.Checked;
+            };
+
+            chkAutoAnalyze.CheckedChanged += (s, e) =>
+            {
+                if (chkAutoAnalyze.Checked) chkPromptOnBuild.Checked = false;
+            };
+
+            chkPromptOnBuild.CheckedChanged += (s, e) =>
+            {
+                if (chkPromptOnBuild.Checked) chkAutoAnalyze.Checked = false;
+            };
+
+            // Separator
+            var sep4 = CreateSeparator(20, y, 550);
+            this.Controls.Add(sep4);
             y += 15;
 
             // Status label
@@ -165,6 +223,12 @@ namespace AIAssistant
             numTimeout.Value = Math.Min(Math.Max(config.TimeoutSeconds, 10), 3600);
             chkShowThinking.Checked = config.ShowThinking;
             numMaxThinkingLength.Value = Math.Min(Math.Max(config.MaxThinkingLength, 100), 50000);
+
+            chkEnableWarningAssistant.Checked = config.EnableWarningFixAssistant;
+            chkPromptOnBuild.Checked = config.ShowWarningPromptOnBuild;
+            chkAutoAnalyze.Checked = config.AutoAnalyzeWarnings;
+            cmbMaxWarnings.SelectedItem = config.MaxWarningsToAnalyze.ToString();
+            if (cmbMaxWarnings.SelectedIndex == -1) cmbMaxWarnings.SelectedItem = "10";
         }
 
         private void SaveUIToConfig()
@@ -177,6 +241,14 @@ namespace AIAssistant
             config.TimeoutSeconds = (int)numTimeout.Value;
             config.ShowThinking = chkShowThinking.Checked;
             config.MaxThinkingLength = (int)numMaxThinkingLength.Value;
+
+            config.EnableWarningFixAssistant = chkEnableWarningAssistant.Checked;
+            config.ShowWarningPromptOnBuild = chkPromptOnBuild.Checked;
+            config.AutoAnalyzeWarnings = chkAutoAnalyze.Checked;
+            if (int.TryParse(cmbMaxWarnings.SelectedItem?.ToString(), out int mw))
+                config.MaxWarningsToAnalyze = mw;
+            else
+                config.MaxWarningsToAnalyze = 10;
         }
 
         private void BtnSave_Click(object sender, EventArgs e)

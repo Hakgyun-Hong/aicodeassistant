@@ -376,6 +376,23 @@ namespace AIAssistant
             catch { }
         }
 
+        public void InjectWarningsAndAnalyze(System.Collections.Generic.List<WarningTodoItem> warnings, int limit)
+        {
+            if (this.InvokeRequired)
+            {
+                this.Invoke(new Action(() => InjectWarningsAndAnalyze(warnings, limit)));
+                return;
+            }
+
+            int count = Math.Min(warnings.Count, limit);
+            for (int i = 0; i < count; i++)
+            {
+                _store.AddOrUpdate(warnings[i]);
+            }
+            RefreshGrid();
+            BtnAnalyzeAll_Click(this, EventArgs.Empty);
+        }
+
         #endregion
 
         #region Helpers

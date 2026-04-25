@@ -40,16 +40,39 @@ namespace AIAssistant
         {
             ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
             {
-                var window = await _package.ShowToolWindowAsync(
-                    typeof(WarningTodoToolWindow), 0, true,
-                    _package.DisposalToken);
-
-                if (window?.Frame is IVsWindowFrame frame)
-                {
-                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                    frame.Show();
-                }
+                await OpenWindowAsync();
             });
+        }
+
+        public async Task OpenWindowAsync()
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var window = await _package.ShowToolWindowAsync(
+                typeof(WarningTodoToolWindow), 0, true,
+                _package.DisposalToken);
+
+            if (window?.Frame is IVsWindowFrame frame)
+            {
+                frame.Show();
+            }
+        }
+
+        public async Task OpenAndAnalyzeAsync(System.Collections.Generic.List<WarningTodoItem> warnings, int limit)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var window = await _package.ShowToolWindowAsync(
+                typeof(WarningTodoToolWindow), 0, true,
+                _package.DisposalToken) as WarningTodoToolWindow;
+
+            if (window?.Frame is IVsWindowFrame frame)
+            {
+                frame.Show();
+            }
+
+            if (window?.Panel != null)
+            {
+                window.Panel.InjectWarningsAndAnalyze(warnings, limit);
+            }
         }
     }
 }

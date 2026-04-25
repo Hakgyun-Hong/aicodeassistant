@@ -126,9 +126,10 @@ namespace AIAssistant
         {
             if (string.IsNullOrEmpty(description)) return "";
 
-            // Match patterns like CS8602, CA1000, IDE0001, etc.
+            // Match patterns like CS8602, CA1000, IDE0001, C4996 (C++), TS2322 (TypeScript), MSB3270
+            // General format: 1 to 4 uppercase letters followed by 1 to 5 digits.
             var match = System.Text.RegularExpressions.Regex.Match(
-                description, @"\b(CS\d{4}|CA\d{4}|IDE\d{4}|SA\d{4})\b");
+                description, @"\b([A-Z]{1,4}\d{1,5})\b");
             return match.Success ? match.Value : "";
         }
 

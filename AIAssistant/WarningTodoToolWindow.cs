@@ -12,17 +12,17 @@ namespace AIAssistant
     [Guid("d7e8f9a0-1b2c-3d4e-5f6a-7b8c9d0e1f2a")]
     public class WarningTodoToolWindow : ToolWindowPane
     {
-        private WarningTodoPanel _panel;
+        public WarningTodoPanel Panel { get; private set; }
 
         public WarningTodoToolWindow() : base(null)
         {
             this.Caption = "⚠️ Warning Fix Assistant";
 
-            _panel = new WarningTodoPanel();
-            _panel.Dock = System.Windows.Forms.DockStyle.Fill;
+            Panel = new WarningTodoPanel();
+            Panel.Dock = System.Windows.Forms.DockStyle.Fill;
 
             WindowsFormsHost host = new WindowsFormsHost();
-            host.Child = _panel;
+            host.Child = Panel;
 
             this.Content = host;
         }

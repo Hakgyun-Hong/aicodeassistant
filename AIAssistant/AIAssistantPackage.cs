@@ -3,6 +3,8 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Task = System.Threading.Tasks.Task;
+using EnvDTE;
+using EnvDTE80;
 
 namespace AIAssistant
 {
@@ -18,6 +20,8 @@ namespace AIAssistant
     public sealed class AIAssistantPackage : AsyncPackage
     {
         public const string PackageGuidString = "72094a93-38fb-4936-af38-b832374315eb";
+
+        private BuildEvents _buildEvents;
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
@@ -38,6 +42,48 @@ namespace AIAssistant
             await OpenChatCommand.InitializeAsync(this);
             await SettingsCommand.InitializeAsync(this);
             await OpenWarningTodoCommand.InitializeAsync(this);
+
+            // Hook Build Events for automated warning analysis
+            if (await this.GetServiceAsync(typeof(DTE)) is DTE2 dte)
+            {
+                _buildEvents = dte.Events.BuildEvents;
+                _buildEvents.OnBuildDone += BuildEvents_OnBuildDone;
+            }
+        }
+
+        private void BuildEvents_OnBuildDone(vsBuildScope Scope, vsBuildAction Action)
+        {
+            ThreadHelper.JoinableTaskFactory.Run(async () =>
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                
+                var config = AssistantConfig.Instance;
+                if (!config.EnableWarningFixAssistant) return;
+
+                // Tiny delay to ensure DTE.ErrorList is fully populated before collecting
+                await Task.Delay(500);
+
+                var warnings = WarningCollector.CollectWarnings();
+                if (warnings.Count == 0) return;
+
+                if (config.AutoAnalyzeWarnings)
+                {
+                    await OpenWarningTodoCommand.Instance.OpenAndAnalyzeAsync(warnings, config.MaxWarningsToAnalyze);
+                }
+                else if (config.ShowWarningPromptOnBuild)
+                {
+                    var result = System.Windows.Forms.MessageBox.Show(
+                        $"Build completed with {warnings.Count} warnings.\nDo you want AI Assistant to analyze them (up to {config.MaxWarningsToAnalyze})?",
+                        "⚠️ AI Warning Fix Assistant",
+                        System.Windows.Forms.MessageBoxButtons.YesNo,
+                        System.Windows.Forms.MessageBoxIcon.Information);
+
+                    if (result == System.Windows.Forms.DialogResult.Yes)
+                    {
+                        await OpenWarningTodoCommand.Instance.OpenAndAnalyzeAsync(warnings, config.MaxWarningsToAnalyze);
+                    }
+                }
+            });
         }
     }
 }
