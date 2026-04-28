@@ -108,8 +108,7 @@ namespace AIAssistant
                 var sb = new StringBuilder();
                 for (int i = start; i <= end; i++)
                 {
-                    string marker = (i == warningIndex) ? ">>>" : "   ";
-                    sb.AppendLine($"{marker} {i + 1}: {lines[i]}");
+                    sb.AppendLine(lines[i]);
                 }
                 return sb.ToString();
             }

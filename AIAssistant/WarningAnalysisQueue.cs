@@ -208,7 +208,7 @@ Return a JSON object with these fields:
         {
             // Match "key": "value" with possible escaped quotes inside
             var match = Regex.Match(json,
-                $"\"{key}\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"",
+                $"\"?{key}\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"",
                 RegexOptions.Singleline);
             if (!match.Success) return "";
 
@@ -223,7 +223,7 @@ Return a JSON object with these fields:
 
         private static bool GetJsonBool(string json, string key)
         {
-            var match = Regex.Match(json, $"\"{key}\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+            var match = Regex.Match(json, $"\"?{key}\"?\\s*:\\s*\"?(true|false)\"?", RegexOptions.IgnoreCase);
             return match.Success && match.Groups[1].Value.Equals("true", StringComparison.OrdinalIgnoreCase);
         }
     }

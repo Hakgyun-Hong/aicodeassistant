@@ -106,7 +106,7 @@ Return JSON only with these exact fields:
 - canFix (bool)
 - summary (string, one-line description)
 - explanation (string, detailed reasoning)
-- originalSnippet (string, exact lines to replace)
+- originalSnippet (string, MUST be an exact, literal substring of the provided Code Context without any modifications or skipped lines)
 - proposedSnippet (string, replacement code)
 - unifiedDiff (string, unified diff format)
 - riskLevel (string: Low, Medium, or High)";
