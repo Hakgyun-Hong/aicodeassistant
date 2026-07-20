@@ -1,5 +1,9 @@
 using System;
 using System.Collections.Concurrent;
+using System.IO;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -43,6 +47,8 @@ namespace AIAssistant
         /// </summary>
         public async Task ProcessAllAsync()
         {
+            // Dispose the previous token source to avoid resource leaks.
+            _cts?.Dispose();
             _cts = new CancellationTokenSource();
             _totalProcessed = 0;
 
@@ -88,26 +94,21 @@ namespace AIAssistant
                 // Build the prompt
                 string systemPrompt = PromptConfig.Instance.WarningFixPrompt;
 
-                string userContent = $@"Warning Code: {item.Code}
+                // Include file extension so the LLM can infer the language.
+                string fileExt = System.IO.Path.GetExtension(item.FilePath);
+
+                // The JSON schema is defined in the system prompt — do not repeat it here.
+                string userContent = $@"Language hint: {fileExt}
+Warning Code: {item.Code}
 Warning Message: {item.Message}
 File: {item.FilePath}
-Line: {item.Line}
-Column: {item.Column}
+Line: {item.Line}, Column: {item.Column}
 Project: {item.Project}
 
-Code Context:
-```
+Code Context (warning is near line {item.Line}):
+```{fileExt.TrimStart('.')}
 {codeContext}
-```
-
-Return a JSON object with these fields:
-- canFix (bool)
-- summary (string, one-line)
-- explanation (string)
-- originalSnippet (string, exact lines to replace)
-- proposedSnippet (string, replacement code)
-- unifiedDiff (string)
-- riskLevel (string: Low/Medium/High)";
+```";
 
                 ct.ThrowIfCancellationRequested();
 
@@ -144,9 +145,47 @@ Return a JSON object with these fields:
             }
         }
 
+        // ───────────────────────────────────────────────────────────────
+        // LLM Response Parsing
+        // ───────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Data contract matching the JSON object the LLM must return.
+        /// Allows DataContractJsonSerializer to deserialize the response
+        /// without requiring external NuGet packages.
+        /// </summary>
+        [DataContract]
+        private sealed class WarningFixResponse
+        {
+            [DataMember(Name = "canFix")]
+            public bool CanFix { get; set; }
+
+            [DataMember(Name = "summary")]
+            public string Summary { get; set; }
+
+            [DataMember(Name = "explanation")]
+            public string Explanation { get; set; }
+
+            [DataMember(Name = "originalSnippet")]
+            public string OriginalSnippet { get; set; }
+
+            [DataMember(Name = "proposedSnippet")]
+            public string ProposedSnippet { get; set; }
+
+            [DataMember(Name = "unifiedDiff")]
+            public string UnifiedDiff { get; set; }
+
+            [DataMember(Name = "riskLevel")]
+            public string RiskLevel { get; set; }
+        }
+
         /// <summary>
         /// Parse LLM JSON response and populate the WarningTodoItem fields.
-        /// Handles both clean JSON and JSON embedded in markdown code blocks.
+        /// Strategy:
+        ///   1. Extract the JSON block (strips ```json fences if present).
+        ///   2. Deserialize via DataContractJsonSerializer (strict, correct).
+        ///   3. Fall back to lenient regex parsing when the LLM returns
+        ///      malformed JSON (e.g. real newlines inside string values).
         /// </summary>
         private void ParseLlmResponse(WarningTodoItem item, string response)
         {
@@ -159,38 +198,46 @@ Return a JSON object with these fields:
 
             try
             {
-                // Extract JSON from response (may be wrapped in ```json ... ```)
-                string json = response.Trim();
-                var jsonMatch = Regex.Match(json, @"```(?:json)?\s*\n?([\s\S]*?)```");
-                if (jsonMatch.Success)
+                // Step 1 — extract the JSON object from surrounding text.
+                string json = ExtractJsonBlock(response);
+
+                // Step 2 — try structured deserialization (handles properly-escaped JSON).
+                WarningFixResponse parsed = TryDeserialize(json);
+
+                // Step 3 — fall back to lenient regex parsing.
+                if (parsed == null)
                 {
-                    json = jsonMatch.Groups[1].Value.Trim();
+                    parsed = new WarningFixResponse
+                    {
+                        CanFix          = GetJsonBool(json, "canFix"),
+                        Summary         = GetJsonString(json, "summary"),
+                        Explanation     = GetJsonString(json, "explanation"),
+                        OriginalSnippet = GetJsonString(json, "originalSnippet"),
+                        ProposedSnippet = GetJsonString(json, "proposedSnippet"),
+                        UnifiedDiff     = GetJsonString(json, "unifiedDiff"),
+                        RiskLevel       = GetJsonString(json, "riskLevel")
+                    };
                 }
 
-                // Simple JSON parsing without System.Text.Json (which isn't in .NET 4.7.2)
-                // Parse key fields manually using regex
-                bool canFix = GetJsonBool(json, "canFix");
-
-                if (!canFix)
+                if (!parsed.CanFix)
                 {
                     item.Status = WarningFixStatus.Failed;
                     item.FailureReason = "LLM determined this warning cannot be safely fixed.";
                     return;
                 }
 
-                item.LlmSummary = GetJsonString(json, "summary");
-                item.LlmExplanation = GetJsonString(json, "explanation");
-                item.OriginalSnippet = GetJsonString(json, "originalSnippet");
-                item.ProposedSnippet = GetJsonString(json, "proposedSnippet");
-                item.UnifiedDiff = GetJsonString(json, "unifiedDiff");
-                item.RiskLevel = GetJsonString(json, "riskLevel");
+                item.LlmSummary       = parsed.Summary;
+                item.LlmExplanation   = parsed.Explanation;
+                item.OriginalSnippet  = parsed.OriginalSnippet;
+                item.ProposedSnippet  = parsed.ProposedSnippet;
+                item.UnifiedDiff      = parsed.UnifiedDiff;
+                item.RiskLevel        = parsed.RiskLevel;
 
                 if (string.IsNullOrWhiteSpace(item.OriginalSnippet) ||
                     string.IsNullOrWhiteSpace(item.ProposedSnippet))
                 {
                     item.Status = WarningFixStatus.Failed;
                     item.FailureReason = "LLM response missing originalSnippet or proposedSnippet.";
-                    return;
                 }
             }
             catch (Exception ex)
@@ -201,29 +248,93 @@ Return a JSON object with these fields:
         }
 
         /// <summary>
-        /// Extract a string value from a JSON object by key name.
-        /// Handles escaped characters in JSON strings.
+        /// Extract a JSON object from raw LLM output.
+        /// Strips ```json ... ``` code fences; otherwise finds the outermost { } block.
+        /// </summary>
+        private static string ExtractJsonBlock(string response)
+        {
+            string text = response.Trim();
+
+            // Try ```json ... ``` or plain ``` ... ``` fence
+            var fenceMatch = Regex.Match(text, @"```(?:json)?\s*\n?([\s\S]*?)```", RegexOptions.Singleline);
+            if (fenceMatch.Success)
+                return fenceMatch.Groups[1].Value.Trim();
+
+            // Fall back: find the outermost { ... } block
+            int start = text.IndexOf('{');
+            int end   = text.LastIndexOf('}');
+            if (start >= 0 && end > start)
+                return text.Substring(start, end - start + 1);
+
+            return text;
+        }
+
+        /// <summary>
+        /// Attempt to deserialize <paramref name="json"/> using DataContractJsonSerializer.
+        /// Returns null if the JSON is malformed or missing required fields.
+        /// </summary>
+        private static WarningFixResponse TryDeserialize(string json)
+        {
+            try
+            {
+                var serializer = new DataContractJsonSerializer(typeof(WarningFixResponse));
+                using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(json)))
+                {
+                    return serializer.ReadObject(ms) as WarningFixResponse;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Lenient regex-based extraction of a JSON string value by key.
+        /// Tries two patterns:
+        ///   1. Standard: value between quotes with \" escapes.
+        ///   2. Fallback: for LLM output that embeds real newlines inside strings.
         /// </summary>
         private static string GetJsonString(string json, string key)
         {
-            // Match "key": "value" with possible escaped quotes inside
-            var match = Regex.Match(json,
-                $"\"?{key}\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"",
-                RegexOptions.Singleline);
-            if (!match.Success) return "";
+            string escapedKey = Regex.Escape(key);
 
-            string value = match.Groups[1].Value;
-            // Unescape common JSON escape sequences
-            value = value.Replace("\\n", "\n")
-                         .Replace("\\t", "\t")
-                         .Replace("\\\"", "\"")
-                         .Replace("\\\\", "\\");
-            return value;
+            // Pattern 1 — standard JSON string (handles backslash-escaped quotes)
+            var match = Regex.Match(json,
+                $"\"?{escapedKey}\"?\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*?)\"",
+                RegexOptions.Singleline);
+            if (match.Success)
+                return UnescapeJsonString(match.Groups[1].Value);
+
+            // Pattern 2 — lenient: capture until the next closing-quote before , or }
+            match = Regex.Match(json,
+                $"\"?{escapedKey}\"?\\s*:\\s*\"([\\s\\S]*?)\"\\s*[,}}]",
+                RegexOptions.Singleline);
+            if (match.Success)
+                return UnescapeJsonString(match.Groups[1].Value);
+
+            return "";
+        }
+
+        /// <summary>
+        /// Unescape standard JSON escape sequences in a parsed string value.
+        /// Order matters: \\\\ must be unescaped last.
+        /// </summary>
+        private static string UnescapeJsonString(string value)
+        {
+            return value
+                .Replace("\\n",  "\n")
+                .Replace("\\t",  "\t")
+                .Replace("\\r",  "\r")
+                .Replace("\\\"", "\"")
+                .Replace("\\\\", "\\");
         }
 
         private static bool GetJsonBool(string json, string key)
         {
-            var match = Regex.Match(json, $"\"?{key}\"?\\s*:\\s*\"?(true|false)\"?", RegexOptions.IgnoreCase);
+            var match = Regex.Match(json,
+                $"\"?{Regex.Escape(key)}\"?\\s*:\\s*\"?(true|false)\"?",
+                RegexOptions.IgnoreCase);
             return match.Success && match.Groups[1].Value.Equals("true", StringComparison.OrdinalIgnoreCase);
         }
     }

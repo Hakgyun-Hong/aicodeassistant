@@ -39,10 +39,19 @@ namespace AIAssistant
         /// </summary>
         public void AddOrUpdate(WarningTodoItem item)
         {
+            // Duplicate detection key: Code + FilePath + first 80 chars of Message.
+            // Using Message (rather than Line) keeps de-duplication correct even after
+            // the file is edited and line numbers shift.
+            int msgLen = Math.Min((item.Message ?? "").Length, 80);
+            string msgKey = (item.Message ?? "").Substring(0, msgLen);
+
             var existing = Items.FirstOrDefault(x =>
                 x.Code == item.Code &&
                 x.FilePath == item.FilePath &&
-                x.Line == item.Line);
+                string.Equals(
+                    (x.Message ?? "").Substring(0, Math.Min((x.Message ?? "").Length, 80)),
+                    msgKey,
+                    StringComparison.OrdinalIgnoreCase));
 
             if (existing == null)
             {

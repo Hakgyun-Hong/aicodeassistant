@@ -52,7 +52,11 @@ namespace AIAssistant
                 string normalizedText = currentText.Replace("\r\n", "\n");
                 string normalizedSnippet = item.OriginalSnippet.Replace("\r\n", "\n").Trim();
 
-                int index = normalizedText.IndexOf(normalizedSnippet, StringComparison.Ordinal);
+                // Find the occurrence closest to the warning's line number.
+                // This avoids mis-applying a fix when the same code pattern appears
+                // in multiple places throughout the file.
+                int preferredOffset = WarningFixApplierHelpers.GetLineStartOffset(normalizedText, item.Line);
+                int index = WarningFixApplierHelpers.FindBestMatchIndex(normalizedText, normalizedSnippet, preferredOffset);
                 if (index < 0)
                 {
                     item.Status = WarningFixStatus.Stale;
@@ -91,6 +95,60 @@ namespace AIAssistant
                 item.UpdatedAt = DateTimeOffset.Now;
                 return $"Apply failed: {ex.Message}";
             }
+        }
+    }
+
+    // Internal helpers used by WarningFixApplier
+    internal static class WarningFixApplierHelpers
+    {
+        /// <summary>
+        /// Returns the character offset in <paramref name="text"/> at which the
+        /// 1-based <paramref name="targetLine"/> begins.
+        /// </summary>
+        internal static int GetLineStartOffset(string text, int targetLine)
+        {
+            if (targetLine <= 1) return 0;
+            int lineNumber = 1;
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (text[i] == '\n')
+                {
+                    lineNumber++;
+                    if (lineNumber >= targetLine)
+                        return i + 1;
+                }
+            }
+            return text.Length;
+        }
+
+        /// <summary>
+        /// Finds all occurrences of <paramref name="snippet"/> inside <paramref name="text"/>
+        /// and returns the index of the occurrence whose start position is closest to
+        /// <paramref name="preferredOffset"/>.
+        /// Returns -1 when no match is found.
+        /// </summary>
+        internal static int FindBestMatchIndex(string text, string snippet, int preferredOffset)
+        {
+            int bestIndex    = -1;
+            int bestDistance = int.MaxValue;
+            int searchFrom   = 0;
+
+            while (searchFrom < text.Length)
+            {
+                int idx = text.IndexOf(snippet, searchFrom, StringComparison.Ordinal);
+                if (idx < 0) break;
+
+                int distance = Math.Abs(idx - preferredOffset);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestIndex    = idx;
+                }
+
+                searchFrom = idx + 1;
+            }
+
+            return bestIndex;
         }
     }
 }

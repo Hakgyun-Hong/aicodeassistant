@@ -35,15 +35,14 @@ namespace AIAssistant
                     {
                         var errorItem = errorItems.Item(i);
 
-                        // Only warnings (not errors or messages)
-                        // vsBuildErrorLevel: 1 = Error, 2 = Warning, 3 = Message
-                        if (!errorItem.Description.Contains("warning") &&
-                            errorItem.Column >= 0) // basic sanity check
-                        {
-                            // Try to determine if it's actually a warning
-                            // ErrorItems don't expose severity directly in older DTE APIs,
-                            // so we check if the project/description pattern matches
-                        }
+                        // Only warnings (not errors or messages).
+                        // DTE ErrorList doesn't expose severity directly in older APIs,
+                        // so filter by description text. C# warnings contain "warning"
+                        // (e.g. "warning CS8602: Dereference of a possibly null reference").
+                        // Items whose description doesn't contain "warning" are errors or
+                        // informational messages and are skipped.
+                        if (description.IndexOf("warning", StringComparison.OrdinalIgnoreCase) < 0)
+                            continue;
 
                         string filePath = errorItem.FileName ?? "";
                         int line = errorItem.Line;
