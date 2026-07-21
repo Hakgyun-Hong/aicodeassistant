@@ -30,6 +30,7 @@ namespace AIAssistant
         private Button btnAccept;
         private Button btnReject;
         private Button btnPreview;
+        private Button btnReanalyze;
 
         private WarningTodoStore _store;
         private WarningAnalysisQueue _analysisQueue;
@@ -213,9 +214,13 @@ namespace AIAssistant
             btnPreview = CreateActionButton("🔎 Preview Diff", ACCENT);
             btnPreview.Click += BtnPreview_Click;
 
+            btnReanalyze = CreateActionButton("🔄 Re-analyze", Color.FromArgb(60, 90, 60));
+            btnReanalyze.Click += BtnReanalyze_Click;
+
             buttonPanel.Controls.Add(btnAccept);
             buttonPanel.Controls.Add(btnReject);
             buttonPanel.Controls.Add(btnPreview);
+            buttonPanel.Controls.Add(btnReanalyze);
 
             rightPanel.Controls.Add(txtDiff);
             rightPanel.Controls.Add(diffLabel);
@@ -316,6 +321,30 @@ namespace AIAssistant
             RefreshGrid();
             ShowDetail(item);
             lblStatus.Text = $"❌ Rejected fix for {item.Code} in {item.ShortFilePath}";
+        }
+
+        private async void BtnReanalyze_Click(object sender, EventArgs e)
+        {
+            var item = GetSelectedItem();
+            if (item == null) return;
+
+            // Disable button to prevent double-clicks during re-analysis.
+            btnReanalyze.Enabled = false;
+            lblStatus.Text = $"🔄 Re-analyzing {item.Code} in {item.ShortFilePath}...";
+
+            await _analysisQueue.ReanalyzeAsync(item);
+
+            // Marshal back to UI thread (ReanalyzeAsync completes on background thread).
+            try
+            {
+                this.Invoke((Action)(() =>
+                {
+                    RefreshGrid();
+                    ShowDetail(item);
+                    lblStatus.Text = $"Re-analysis complete: {item.StatusText}  {item.Code} in {item.ShortFilePath}";
+                }));
+            }
+            catch { }
         }
 
         private void BtnPreview_Click(object sender, EventArgs e)
@@ -493,10 +522,14 @@ namespace AIAssistant
             }
 
             // Enable/disable buttons based on status
-            btnAccept.Enabled = item.Status == WarningFixStatus.Suggested;
-            btnReject.Enabled = item.Status == WarningFixStatus.Suggested ||
-                                item.Status == WarningFixStatus.PendingAnalysis;
-            btnPreview.Enabled = item.Status == WarningFixStatus.Suggested;
+            btnAccept.Enabled    = item.Status == WarningFixStatus.Suggested;
+            btnReject.Enabled    = item.Status == WarningFixStatus.Suggested ||
+                                   item.Status == WarningFixStatus.PendingAnalysis;
+            btnPreview.Enabled   = item.Status == WarningFixStatus.Suggested;
+            btnReanalyze.Enabled = item.Status == WarningFixStatus.Suggested ||
+                                   item.Status == WarningFixStatus.Failed     ||
+                                   item.Status == WarningFixStatus.Stale      ||
+                                   item.Status == WarningFixStatus.Rejected;
         }
 
         private void ShowColoredDiff(string diff)
