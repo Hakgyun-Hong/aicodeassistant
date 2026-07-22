@@ -32,6 +32,10 @@ namespace AIAssistant
         private Button btnPreview;
         private Button btnReanalyze;
 
+        // Track the last item we navigated to so single-click doesn't re-navigate
+        // when the grid refreshes and re-selects the same row.
+        private Guid _lastNavigatedItemId = Guid.Empty;
+
         private WarningTodoStore _store;
         private WarningAnalysisQueue _analysisQueue;
 
@@ -302,6 +306,12 @@ namespace AIAssistant
             {
                 lblStatus.Text = $"✅ Fix applied to {item.ShortFilePath}. Backup saved as .warningfix.bak";
                 _store.NotifyChanged();
+
+                // Navigate to the fix location so the user can immediately review
+                // the change. Reset the last-navigated ID so NavigateToItem runs
+                // even though the same item is still selected.
+                _lastNavigatedItemId = Guid.Empty;
+                NavigateToItem(item);
             }
             else
             {
@@ -367,7 +377,18 @@ namespace AIAssistant
         private void GridView_SelectionChanged(object sender, EventArgs e)
         {
             var item = GetSelectedItem();
-            if (item != null) ShowDetail(item);
+            if (item == null) return;
+
+            ShowDetail(item);
+
+            // Navigate VS editor to the warning location on single-click,
+            // but only when a different item is selected (avoid re-navigating
+            // during grid refresh that preserves the current selection).
+            if (item.Id != _lastNavigatedItemId)
+            {
+                _lastNavigatedItemId = item.Id;
+                NavigateToItem(item);
+            }
         }
 
         private void GridView_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
@@ -376,16 +397,54 @@ namespace AIAssistant
             var item = GetSelectedItem();
             if (item == null || string.IsNullOrEmpty(item.FilePath)) return;
 
-            // Navigate to the warning location
+            // Double-click: force re-navigation even if it's the same item
+            _lastNavigatedItemId = item.Id;
+            NavigateToItem(item);
+        }
+
+        /// <summary>
+        /// Open <paramref name="item"/>'s file in Visual Studio and move the cursor
+        /// to the exact line and column reported by the build error list.
+        /// </summary>
+        private void NavigateToItem(WarningTodoItem item)
+        {
+            if (item == null || string.IsNullOrEmpty(item.FilePath)) return;
+
             ThreadHelper.JoinableTaskFactory.Run(async () =>
             {
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                 try
                 {
-                    Helper.DteInstance?.ItemOperations.OpenFile(item.FilePath);
-                    if (Helper.DteInstance?.ActiveDocument?.Selection is EnvDTE.TextSelection textSel)
+                    var dte = Helper.DteInstance;
+                    if (dte == null) return;
+
+                    // Open the file (no-op if already open)
+                    dte.ItemOperations.OpenFile(item.FilePath);
+
+                    if (dte.ActiveDocument?.Selection is EnvDTE.TextSelection textSel)
                     {
-                        textSel.GotoLine(item.Line, false);
+                        // Move to line first
+                        textSel.GotoLine(item.Line, Select: false);
+
+                        // Then move to the specific column within that line
+                        if (item.Column > 1)
+                        {
+                            try
+                            {
+                                // MoveToLineAndOffset is 1-based
+                                var editPoint = (dte.ActiveDocument.Object("TextDocument") as EnvDTE.TextDocument)
+                                                    ?.CreateEditPoint();
+                                if (editPoint != null)
+                                {
+                                    editPoint.MoveToLineAndOffset(item.Line, item.Column);
+                                    textSel.MoveToPoint(editPoint, Extend: false);
+                                }
+                            }
+                            catch
+                            {
+                                // Column navigation failed — line position is already set, that's fine.
+                            }
+                        }
                     }
                 }
                 catch { }
