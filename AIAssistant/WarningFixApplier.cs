@@ -61,63 +61,18 @@ namespace AIAssistant
                 Log($"[{item.Code}] Step 2 Searching. PreferredOffset={preferredOffset} (line {item.Line}). Snippet={rawSnippet.Length} chars.");
                 Log($"[{item.Code}] Snippet preview: {Truncate(rawSnippet, 120)}");
 
-                int    index          = -1;
-                string matchedSnippet = rawSnippet;
-                string tier           = "";
-
-                // — Tier 1: exact match (line-ending normalized) —
-                index = WarningFixApplierHelpers.FindBestMatchIndex(normalizedText, rawSnippet, preferredOffset);
-                if (index >= 0)
+                // ── 3-tier matching (also callable standalone via FindSnippet) ──
+                var match = FindSnippet(normalizedText, rawSnippet, preferredOffset, item.Code);
+                if (!match.Found)
                 {
-                    matchedSnippet = rawSnippet;
-                    tier           = "Tier 1 (exact)";
-                    Log($"[{item.Code}] Tier 1 exact match found at charIndex={index}.");
-                }
-
-                // — Tier 2: whitespace-normalized match —
-                if (index < 0)
-                {
-                    Log($"[{item.Code}] Tier 1 FAILED. Trying Tier 2 (whitespace-normalized)...");
-                    int wsIndex = WarningFixApplierHelpers.FindWhitespaceNormalizedMatch(
-                        normalizedText, rawSnippet, preferredOffset,
-                        out int realStart, out int realEnd);
-
-                    if (wsIndex >= 0)
-                    {
-                        index          = realStart;
-                        matchedSnippet = normalizedText.Substring(realStart, realEnd - realStart);
-                        tier           = "Tier 2 (whitespace-normalized)";
-                        Log($"[{item.Code}] Tier 2 match found. charIndex={index}, length={matchedSnippet.Length}.");
-                    }
-                }
-
-                // — Tier 3: first+last non-empty line anchor —
-                if (index < 0)
-                {
-                    Log($"[{item.Code}] Tier 2 FAILED. Trying Tier 3 (anchor lines)...");
-                    var result = WarningFixApplierHelpers.FindByAnchorLines(
-                        normalizedText, rawSnippet, preferredOffset);
-
-                    if (result.HasValue)
-                    {
-                        index          = result.Value.start;
-                        matchedSnippet = normalizedText.Substring(
-                            result.Value.start, result.Value.end - result.Value.start);
-                        tier = "Tier 3 (anchor lines)";
-                        Log($"[{item.Code}] Tier 3 match found. charIndex={index}, length={matchedSnippet.Length}.");
-                    }
-                }
-
-                if (index < 0)
-                {
-                    Log($"[{item.Code}] All 3 tiers FAILED — snippet not found in file.");
+                    Log($"[{item.Code}] All tiers FAILED — snippet not found in file.");
                     item.Status    = WarningFixStatus.Stale;
                     item.UpdatedAt = DateTimeOffset.Now;
                     return "Original code snippet was not found (tried exact, whitespace-normalized, and anchor-line matching). " +
                            "The file may have been heavily edited. Use \uD83D\uDD04 Re-analyze to get a fresh suggestion.";
                 }
 
-                Log($"[{item.Code}] Match accepted via {tier}.");
+                Log($"[{item.Code}] Match accepted via {match.Tier}. charIndex={match.Index}, length={match.Length}.");
 
                 // ── Step 3: Backup ────────────────────────────────────────────
                 string backupPath = item.FilePath + ".warningfix.bak";
@@ -126,9 +81,9 @@ namespace AIAssistant
 
                 // ── Step 4: Replace ───────────────────────────────────────────
                 string proposedSnippet = item.ProposedSnippet.Replace("\r\n", "\n");
-                string newText = normalizedText.Substring(0, index)
+                string newText = normalizedText.Substring(0, match.Index)
                                + proposedSnippet
-                               + normalizedText.Substring(index + matchedSnippet.Length);
+                               + normalizedText.Substring(match.Index + match.Length);
 
                 // Restore CRLF if the original file used it
                 if (currentText.Contains("\r\n"))
@@ -140,7 +95,7 @@ namespace AIAssistant
                 // ── Step 5: Update status ─────────────────────────────────────
                 item.Status    = WarningFixStatus.Accepted;
                 item.UpdatedAt = DateTimeOffset.Now;
-                Log($"[{item.Code}] Apply SUCCESS via {tier}.");
+                Log($"[{item.Code}] Apply SUCCESS via {match.Tier}.");
 
                 return null; // success
             }
@@ -177,18 +132,106 @@ namespace AIAssistant
             if (string.IsNullOrEmpty(text)) return "(empty)";
             return text.Length <= maxLen ? text : text.Substring(0, maxLen) + "…";
         }
+
+        // ─── Standalone testable snippet finder ──────────────────────────────
+
+        /// <summary>
+        /// Run the 3-tier snippet search against <paramref name="fileText"/> without
+        /// touching the file system. Useful for unit tests and manual debugging.
+        /// </summary>
+        /// <param name="fileText">Full source file content (any line endings).</param>
+        /// <param name="snippet">The <c>originalSnippet</c> from the LLM suggestion.</param>
+        /// <param name="hintLine">1-based line number of the warning (used to prefer the closest match).</param>
+        /// <param name="label">Optional label for Debug output (e.g. the warning code).</param>
+        public static SnippetMatchResult FindSnippet(
+            string fileText, string snippet, int hintLine, string label = "")
+        {
+            string normText    = fileText.Replace("\r\n", "\n");
+            string normSnippet = snippet.Replace("\r\n", "\n").Trim();
+            int    preferred   = WarningFixApplierHelpers.GetLineStartOffset(normText, hintLine);
+
+            return FindSnippet(normText, normSnippet, preferred, label);
+        }
+
+        // Internal overload used by Apply() (already has normalized strings)
+        internal static SnippetMatchResult FindSnippet(
+            string normalizedText, string normalizedSnippet, int preferredOffset, string label)
+        {
+            // Tier 1
+            int idx = WarningFixApplierHelpers.FindBestMatchIndex(
+                normalizedText, normalizedSnippet, preferredOffset);
+            if (idx >= 0)
+            {
+                Log($"[{label}] Tier 1 exact match at charIndex={idx}.");
+                return new SnippetMatchResult(
+                    true, "Tier 1 (exact)", idx, normalizedSnippet.Length,
+                    normalizedText.Substring(idx, normalizedSnippet.Length));
+            }
+
+            // Tier 2
+            Log($"[{label}] Tier 1 FAILED. Trying Tier 2 (whitespace-normalized)...");
+            int wsIdx = WarningFixApplierHelpers.FindWhitespaceNormalizedMatch(
+                normalizedText, normalizedSnippet, preferredOffset,
+                out int realStart, out int realEnd);
+            if (wsIdx >= 0)
+            {
+                int len = realEnd - realStart;
+                Log($"[{label}] Tier 2 match at charIndex={realStart}, length={len}.");
+                return new SnippetMatchResult(
+                    true, "Tier 2 (whitespace-normalized)", realStart, len,
+                    normalizedText.Substring(realStart, len));
+            }
+
+            // Tier 3
+            Log($"[{label}] Tier 2 FAILED. Trying Tier 3 (anchor lines)...");
+            var anchor = WarningFixApplierHelpers.FindByAnchorLines(
+                normalizedText, normalizedSnippet, preferredOffset);
+            if (anchor.HasValue)
+            {
+                int len = anchor.Value.end - anchor.Value.start;
+                Log($"[{label}] Tier 3 match at charIndex={anchor.Value.start}, length={len}.");
+                return new SnippetMatchResult(
+                    true, "Tier 3 (anchor lines)", anchor.Value.start, len,
+                    normalizedText.Substring(anchor.Value.start, len));
+            }
+
+            Log($"[{label}] All tiers FAILED.");
+            return SnippetMatchResult.NotFound;
+        }
+    }
+
+    /// <summary>Result returned by <see cref="WarningFixApplier.FindSnippet"/>.</summary>
+    public sealed class SnippetMatchResult
+    {
+        public static readonly SnippetMatchResult NotFound =
+            new SnippetMatchResult(false, "", -1, 0, "");
+
+        public bool   Found         { get; }
+        public string Tier          { get; }  // e.g. "Tier 1 (exact)"
+        public int    Index         { get; }  // char offset in normalized text
+        public int    Length        { get; }  // length of matched block
+        public string MatchedText   { get; }  // the actual matched block
+
+        public SnippetMatchResult(bool found, string tier, int index, int length, string matchedText)
+        {
+            Found       = found;
+            Tier        = tier;
+            Index       = index;
+            Length      = length;
+            MatchedText = matchedText;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // WarningFixApplierHelpers — line/offset utilities and multi-tier matching
+    // WarningFixApplierHelpers — now public for unit-test access
     // ─────────────────────────────────────────────────────────────────────────
 
-    internal static class WarningFixApplierHelpers
+    public static class WarningFixApplierHelpers
     {
         // ── Line ↔ character-offset utilities ────────────────────────────────
 
         /// <summary>Character offset where 1-based <paramref name="targetLine"/> begins.</summary>
-        internal static int GetLineStartOffset(string text, int targetLine)
+        public static int GetLineStartOffset(string text, int targetLine)
         {
             if (targetLine <= 1) return 0;
             int lineNumber = 1;
@@ -204,7 +247,7 @@ namespace AIAssistant
         }
 
         /// <summary>Character offset just past the end of 1-based <paramref name="targetLine"/>.</summary>
-        internal static int GetLineEndOffset(string text, int targetLine)
+        public static int GetLineEndOffset(string text, int targetLine)
         {
             int start = GetLineStartOffset(text, targetLine);
             for (int i = start; i < text.Length; i++)
@@ -213,7 +256,7 @@ namespace AIAssistant
         }
 
         /// <summary>1-based line number that contains character offset <paramref name="charOffset"/>.</summary>
-        internal static int GetLineAtOffset(string text, int charOffset)
+        public static int GetLineAtOffset(string text, int charOffset)
         {
             int line = 1;
             int end  = Math.Min(charOffset, text.Length);
@@ -229,7 +272,7 @@ namespace AIAssistant
         /// and return the start index of the occurrence closest to <paramref name="preferredOffset"/>.
         /// Returns -1 when not found.
         /// </summary>
-        internal static int FindBestMatchIndex(string text, string snippet, int preferredOffset)
+        public static int FindBestMatchIndex(string text, string snippet, int preferredOffset)
         {
             int bestIndex    = -1;
             int bestDistance = int.MaxValue;
@@ -258,7 +301,7 @@ namespace AIAssistant
         /// the character range in the ORIGINAL (un-normalized) text.
         /// Returns the match index in the normalized text, or -1.
         /// </summary>
-        internal static int FindWhitespaceNormalizedMatch(
+        public static int FindWhitespaceNormalizedMatch(
             string text, string snippet,
             int preferredOffset,
             out int realStart, out int realEnd)
@@ -286,7 +329,7 @@ namespace AIAssistant
         /// Normalize each line to a single leading space + trimmed content.
         /// This makes indentation changes invisible to string matching.
         /// </summary>
-        internal static string NormalizeIndent(string text)
+        public static string NormalizeIndent(string text)
         {
             var sb = new System.Text.StringBuilder(text.Length);
             foreach (var line in text.Split('\n'))
@@ -307,7 +350,7 @@ namespace AIAssistant
         /// surrounding context lines that differ from the real file.
         /// Returns the (start, end) character range, or null.
         /// </summary>
-        internal static (int start, int end)? FindByAnchorLines(
+        public static (int start, int end)? FindByAnchorLines(
             string text, string snippet, int preferredOffset)
         {
             string[] sLines = snippet.Split('\n');
