@@ -32,6 +32,14 @@ namespace AIAssistant
         private Button btnPreview;
         private Button btnReanalyze;
 
+        // ── Filter controls (created in BuildFilterBar) ──────────────────────
+        private ComboBox cmbFilterProject;
+        private ComboBox cmbFilterRisk;
+        private ComboBox cmbFilterStatus;
+        private TextBox  txtFilterCode;
+        /// <summary>Prevents RefreshGrid re-entrancy while populating filter dropdowns.</summary>
+        private bool _suppressFilterEvents;
+
         // Track the last item we navigated to so single-click doesn't re-navigate
         // when the grid refreshes and re-selects the same row.
         private Guid _lastNavigatedItemId = Guid.Empty;
@@ -78,10 +86,15 @@ namespace AIAssistant
             var btnCancel = CreateToolButton("⏹ Cancel", Color.FromArgb(100, 50, 50));
             btnCancel.Click += (s, e) => _analysisQueue.Cancel();
 
+            // Bulk-retry items that Failed or went Stale
+            var btnRetryFailed = CreateToolButton("🔄 Retry Failed", Color.FromArgb(90, 60, 30));
+            btnRetryFailed.Click += BtnReanalyzeFailed_Click;
+
             toolbar.Controls.Add(btnScan);
             toolbar.Controls.Add(btnAnalyzeAll);
             toolbar.Controls.Add(btnCancel);
             toolbar.Controls.Add(btnClear);
+            toolbar.Controls.Add(btnRetryFailed);
 
             // ═══ Bottom Status Bar ═══
             lblStatus = new Label
@@ -97,13 +110,26 @@ namespace AIAssistant
             };
 
             // ═══ Main Split Panel ═══
+            // Initial split: 40% list / 60% detail (F-pattern reading: scan left, read right).
+            // User can drag the splitter freely; ratio is only set once on first layout.
             var splitContainer = new SplitContainer
             {
-                Dock = DockStyle.Fill,
-                Orientation = Orientation.Vertical,
-                SplitterWidth = 3,
-                BackColor = BORDER,
-                SplitterDistance = 400
+                Dock          = DockStyle.Fill,
+                Orientation   = Orientation.Vertical,
+                SplitterWidth = 4,           // wider bar for easier grabbing
+                BackColor     = BORDER,
+                Panel1MinSize = 260,         // list pane must be at least 260px
+                Panel2MinSize = 300,         // detail pane must be at least 300px
+            };
+
+            bool mainSplitSet = false;
+            splitContainer.Resize += (s, e) =>
+            {
+                if (!mainSplitSet && splitContainer.Width > 100)
+                {
+                    splitContainer.SplitterDistance = Math.Max(260, (int)(splitContainer.Width * 0.40));
+                    mainSplitSet = true;
+                }
             };
 
             // ─── Left: DataGridView ───
@@ -141,72 +167,54 @@ namespace AIAssistant
                 EnableHeadersVisualStyles = false
             };
 
-            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "Status", Width = 90, DataPropertyName = "StatusText" });
-            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Code", HeaderText = "Code", Width = 70, DataPropertyName = "Code" });
-            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "File", HeaderText = "File", Width = 120, DataPropertyName = "ShortFilePath" });
-            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Line", HeaderText = "Line", Width = 50, DataPropertyName = "Line" });
-            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Summary", HeaderText = "Summary", Width = 200, DataPropertyName = "LlmSummary" });
-            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Risk", HeaderText = "Risk", Width = 60, DataPropertyName = "RiskLevel" });
+            // Column fill weights (sum = 100 → treated as percentages by Fill mode):
+            //   Summary 33%  Project 20%  File 15%  Status 10%  Code 9%  Risk 7%  Line 6%
+            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status",  HeaderText = "Status",  FillWeight = 10, MinimumWidth = 70,  DataPropertyName = "StatusText" });
+            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Code",    HeaderText = "Code",    FillWeight =  9, MinimumWidth = 55,  DataPropertyName = "Code" });
+            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "File",    HeaderText = "File",    FillWeight = 15, MinimumWidth = 85,  DataPropertyName = "ShortFilePath" });
+            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Line",    HeaderText = "Line",    FillWeight =  6, MinimumWidth = 38,  DataPropertyName = "Line" });
+            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Summary", HeaderText = "Summary", FillWeight = 33, MinimumWidth = 120, DataPropertyName = "LlmSummary" });
+            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Risk",    HeaderText = "Risk",    FillWeight =  7, MinimumWidth = 45,  DataPropertyName = "RiskLevel" });
+            gridView.Columns.Add(new DataGridViewTextBoxColumn { Name = "Project", HeaderText = "Project", FillWeight = 20, MinimumWidth = 65,  DataPropertyName = "Project" });
+
+            // Row height: Segoe UI 9pt line height (~12px) + 6px top/bottom padding = 24px
+            gridView.RowTemplate.Height = 24;
+
+            // Subtle alternating row tint (avoids wall-of-same-colour effect)
+            gridView.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+            {
+                BackColor          = Color.FromArgb(30, 30, 40),
+                ForeColor          = FG,
+                SelectionBackColor = Color.FromArgb(38, 79, 120),
+                SelectionForeColor = Color.White
+            };
 
             gridView.SelectionChanged += GridView_SelectionChanged;
-            gridView.CellDoubleClick += GridView_CellDoubleClick;
+            gridView.CellDoubleClick  += GridView_CellDoubleClick;
+            gridView.CellFormatting   += GridView_CellFormatting;
 
             splitContainer.Panel1.Controls.Add(gridView);
             splitContainer.Panel1.BackColor = BG;
 
             // ─── Right: Detail Pane ───
+            // Nested horizontal SplitContainer: top 28% = info text, bottom 72% = diff code.
+            // Ratio set once on first layout; user can drag the horizontal splitter freely.
             var rightPanel = new Panel
             {
-                Dock = DockStyle.Fill,
+                Dock      = DockStyle.Fill,
                 BackColor = BG,
-                Padding = new Padding(8)
+                Padding   = new Padding(0)
             };
 
-            // Detail text (warning info + explanation)
-            txtDetail = new RichTextBox
-            {
-                Dock = DockStyle.Top,
-                Height = 120,
-                BackColor = BG2,
-                ForeColor = FG,
-                Font = new Font("Segoe UI", 9f),
-                BorderStyle = BorderStyle.None,
-                ReadOnly = true,
-                ScrollBars = RichTextBoxScrollBars.Vertical
-            };
-
-            // Diff view
-            var diffLabel = new Label
-            {
-                Text = "📝 Proposed Change",
-                Dock = DockStyle.Top,
-                Height = 22,
-                ForeColor = Color.FromArgb(79, 193, 255),
-                Font = new Font("Segoe UI", 9f, FontStyle.Bold),
-                Padding = new Padding(0, 4, 0, 0)
-            };
-
-            txtDiff = new RichTextBox
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(26, 26, 26),
-                ForeColor = FG,
-                Font = new Font("Consolas", 10f),
-                BorderStyle = BorderStyle.None,
-                ReadOnly = true,
-                WordWrap = false,
-                ScrollBars = RichTextBoxScrollBars.Both
-            };
-
-            // Action buttons
+            // Action buttons pinned to the bottom
             var buttonPanel = new FlowLayoutPanel
             {
-                Dock = DockStyle.Bottom,
-                Height = 40,
-                BackColor = BG2,
+                Dock          = DockStyle.Bottom,
+                Height        = 40,
+                BackColor     = BG2,
                 FlowDirection = FlowDirection.RightToLeft,
-                Padding = new Padding(4, 6, 4, 6),
-                WrapContents = false
+                Padding       = new Padding(4, 6, 4, 6),
+                WrapContents  = false
             };
 
             btnAccept = CreateActionButton("✅ Accept & Apply", SUCCESS);
@@ -226,9 +234,69 @@ namespace AIAssistant
             buttonPanel.Controls.Add(btnPreview);
             buttonPanel.Controls.Add(btnReanalyze);
 
-            rightPanel.Controls.Add(txtDiff);
-            rightPanel.Controls.Add(diffLabel);
-            rightPanel.Controls.Add(txtDetail);
+            // Horizontal split: 28% info text / 72% diff view
+            var detailDiffSplit = new SplitContainer
+            {
+                Dock          = DockStyle.Fill,
+                Orientation   = Orientation.Horizontal,
+                SplitterWidth = 4,
+                BackColor     = BORDER,
+                Panel1MinSize = 80,    // min info height
+                Panel2MinSize = 100,   // min diff height
+            };
+
+            bool detailSplitSet = false;
+            detailDiffSplit.Resize += (s, e) =>
+            {
+                if (!detailSplitSet && detailDiffSplit.Height > 50)
+                {
+                    detailDiffSplit.SplitterDistance = Math.Max(80, (int)(detailDiffSplit.Height * 0.28));
+                    detailSplitSet = true;
+                }
+            };
+
+            // Top panel — warning info + LLM explanation
+            txtDetail = new RichTextBox
+            {
+                Dock        = DockStyle.Fill,
+                BackColor   = BG2,
+                ForeColor   = FG,
+                Font        = new Font("Segoe UI", 9f),
+                BorderStyle = BorderStyle.None,
+                ReadOnly    = true,
+                ScrollBars  = RichTextBoxScrollBars.Vertical,
+                Padding     = new Padding(6)
+            };
+            detailDiffSplit.Panel1.Controls.Add(txtDetail);
+            detailDiffSplit.Panel1.BackColor = BG2;
+
+            // Bottom panel — code diff
+            var diffLabel = new Label
+            {
+                Text      = "📝 Proposed Change",
+                Dock      = DockStyle.Top,
+                Height    = 22,
+                ForeColor = Color.FromArgb(79, 193, 255),
+                Font      = new Font("Segoe UI", 9f, FontStyle.Bold),
+                Padding   = new Padding(6, 4, 0, 0),
+                BackColor = Color.FromArgb(22, 22, 30)
+            };
+            txtDiff = new RichTextBox
+            {
+                Dock        = DockStyle.Fill,
+                BackColor   = Color.FromArgb(22, 22, 30),
+                ForeColor   = FG,
+                Font        = new Font("Consolas", 9.5f),
+                BorderStyle = BorderStyle.None,
+                ReadOnly    = true,
+                WordWrap    = false,
+                ScrollBars  = RichTextBoxScrollBars.Both
+            };
+            detailDiffSplit.Panel2.Controls.Add(txtDiff);
+            detailDiffSplit.Panel2.Controls.Add(diffLabel);
+            detailDiffSplit.Panel2.BackColor = Color.FromArgb(22, 22, 30);
+
+            rightPanel.Controls.Add(detailDiffSplit);
             rightPanel.Controls.Add(buttonPanel);
 
             splitContainer.Panel2.Controls.Add(rightPanel);
@@ -237,6 +305,7 @@ namespace AIAssistant
             // ═══ Assemble ═══
             this.Controls.Add(splitContainer);
             this.Controls.Add(lblStatus);
+            this.Controls.Add(BuildFilterBar()); // filter bar sits between toolbar and content
             this.Controls.Add(toolbar);
         }
 
@@ -294,6 +363,37 @@ namespace AIAssistant
             txtDetail.Clear();
             txtDiff.Clear();
             lblStatus.Text = "Cleared.";
+        }
+
+        private async void BtnReanalyzeFailed_Click(object sender, EventArgs e)
+        {
+            var failedItems = _store.Items
+                .Where(x => x.Status == WarningFixStatus.Failed ||
+                            x.Status == WarningFixStatus.Stale)
+                .ToList();
+
+            if (failedItems.Count == 0)
+            {
+                lblStatus.Text = "ℹ️ No failed or stale items to re-analyze.";
+                return;
+            }
+
+            lblStatus.Text = $"🔄 Queuing {failedItems.Count} failed/stale item(s) for re-analysis...";
+
+            _analysisQueue.ResetAndEnqueue(failedItems);
+            RefreshGrid();
+
+            await _analysisQueue.ProcessAllAsync();
+
+            try
+            {
+                this.Invoke((Action)(() =>
+                {
+                    RefreshGrid();
+                    lblStatus.Text = $"Retry complete. {_store.GetStatusSummary()}";
+                }));
+            }
+            catch { }
         }
 
         private void BtnAccept_Click(object sender, EventArgs e)
@@ -372,6 +472,36 @@ namespace AIAssistant
                 $"```\n{proposed}\n```\n\n{explanation}");
 
             dialog.ShowDialog();
+        }
+
+        /// <summary>
+        /// Color-code the Status and Risk columns based on the item's current state.
+        /// Called by DataGridView for each visible cell; must be fast (no I/O).
+        /// </summary>
+        private void GridView_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+            var item = gridView.Rows[e.RowIndex].DataBoundItem as WarningTodoItem;
+            if (item == null) return;
+
+            string col = gridView.Columns[e.ColumnIndex].Name;
+            if (col == "Risk")
+            {
+                e.CellStyle.ForeColor =
+                    item.RiskLevel == "High"   ? DANGER     :
+                    item.RiskLevel == "Medium" ? WARNING_CLR :
+                    item.RiskLevel == "Low"    ? SUCCESS     : FG;
+                e.FormattingApplied = true;
+            }
+            else if (col == "Status")
+            {
+                e.CellStyle.ForeColor =
+                    item.Status == WarningFixStatus.Suggested ? Color.FromArgb(79, 193, 255) :
+                    item.Status == WarningFixStatus.Accepted  ? SUCCESS     :
+                    item.Status == WarningFixStatus.Failed    ? DANGER      :
+                    item.Status == WarningFixStatus.Stale     ? WARNING_CLR : FG;
+                e.FormattingApplied = true;
+            }
         }
 
         private void GridView_SelectionChanged(object sender, EventArgs e)
@@ -508,9 +638,11 @@ namespace AIAssistant
         {
             try
             {
-                // Manually refresh — BindingList doesn't always trigger DataGridView updates
+                RefreshProjectFilter();
+
+                var filtered = GetFilteredItems().ToList();
                 gridView.DataSource = null;
-                gridView.DataSource = _store.Items;
+                gridView.DataSource = filtered;
                 gridView.Refresh();
             }
             catch { }
@@ -520,6 +652,205 @@ namespace AIAssistant
         {
             if (gridView.SelectedRows.Count == 0) return null;
             return gridView.SelectedRows[0].DataBoundItem as WarningTodoItem;
+        }
+
+        // ─── Filter helpers ───────────────────────────────────────────────────
+
+        /// <summary>
+        /// Apply current filter bar selections to _store.Items.
+        /// Returns the matching subset (same object references — safe for GetSelectedItem).
+        /// </summary>
+        private IEnumerable<WarningTodoItem> GetFilteredItems()
+        {
+            IEnumerable<WarningTodoItem> items = _store.Items;
+
+            // Project
+            string project = cmbFilterProject?.SelectedItem as string;
+            if (project != null && project != "(All)")
+                items = items.Where(x =>
+                    string.Equals(x.Project, project, StringComparison.OrdinalIgnoreCase));
+
+            // Risk level
+            string risk = cmbFilterRisk?.SelectedItem as string;
+            if (risk != null && risk != "(All)")
+                items = items.Where(x =>
+                    string.Equals(x.RiskLevel, risk, StringComparison.OrdinalIgnoreCase));
+
+            // Status — ComboBox items match WarningTodoItem.StatusText exactly
+            string statusDisplay = cmbFilterStatus?.SelectedItem as string;
+            if (statusDisplay != null && statusDisplay != "(All)")
+                items = items.Where(x => x.StatusText == statusDisplay);
+
+            // Code / message full-text search
+            string query = txtFilterCode?.Text?.Trim();
+            if (!string.IsNullOrEmpty(query))
+                items = items.Where(x =>
+                    (x.Code    ?? "").IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    (x.Message ?? "").IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0);
+
+            return items;
+        }
+
+        /// <summary>
+        /// Rebuild the Project dropdown from current store data, preserving the
+        /// user's current selection. Suppresses filter events to avoid re-entrancy.
+        /// </summary>
+        private void RefreshProjectFilter()
+        {
+            if (cmbFilterProject == null) return;
+            _suppressFilterEvents = true;
+            try
+            {
+                string prev     = cmbFilterProject.SelectedItem as string;
+                var projects    = new System.Collections.Generic.List<string> { "(All)" };
+                projects.AddRange(
+                    _store.Items
+                          .Select(x => x.Project ?? "")
+                          .Where(p => p.Length > 0)
+                          .Distinct(StringComparer.OrdinalIgnoreCase)
+                          .OrderBy(p => p));
+
+                // Avoid visual flicker if the list hasn't changed
+                if (cmbFilterProject.Items.Count != projects.Count ||
+                    !projects.SequenceEqual(cmbFilterProject.Items.Cast<string>()))
+                {
+                    cmbFilterProject.DataSource = null;
+                    cmbFilterProject.DataSource = projects;
+                }
+
+                int idx = projects.IndexOf(prev ?? "(All)");
+                cmbFilterProject.SelectedIndex = Math.Max(0, idx);
+            }
+            finally
+            {
+                _suppressFilterEvents = false;
+            }
+        }
+
+        private void OnFilterChanged(object sender, EventArgs e)
+        {
+            if (_suppressFilterEvents) return;
+            RefreshGrid();
+        }
+
+        /// <summary>
+        /// Build the filter bar panel that sits between the toolbar and the split view.
+        /// </summary>
+        private Panel BuildFilterBar()
+        {
+            var bar = new Panel
+            {
+                Dock      = DockStyle.Top,
+                Height    = 30,
+                BackColor = Color.FromArgb(32, 32, 42),
+                Padding   = new Padding(6, 3, 6, 3)
+            };
+
+            var layout = new FlowLayoutPanel
+            {
+                Dock          = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents  = false,
+                AutoSize      = false
+            };
+
+            Func<string, Label> mkLabel = text => new Label
+            {
+                Text      = text,
+                AutoSize  = true,
+                ForeColor = Color.FromArgb(140, 143, 150),
+                Padding   = new Padding(0, 4, 2, 0),
+                Font      = new Font("Segoe UI", 8.5f)
+            };
+
+            Func<int, ComboBox> mkCombo = width => new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width         = width,
+                FlatStyle     = FlatStyle.Flat,
+                BackColor     = Color.FromArgb(50, 50, 60),
+                ForeColor     = Color.White,
+                Font          = new Font("Segoe UI", 8.5f),
+                Margin        = new Padding(0, 2, 8, 0)
+            };
+
+            // Code / Message search
+            layout.Controls.Add(mkLabel("🔍"));
+            txtFilterCode = new TextBox
+            {
+                Width       = 130,
+                BackColor   = Color.FromArgb(50, 50, 60),
+                ForeColor   = Color.White,
+                Font        = new Font("Segoe UI", 8.5f),
+                BorderStyle = BorderStyle.FixedSingle,
+                Margin      = new Padding(0, 2, 10, 0)
+            };
+            txtFilterCode.TextChanged += OnFilterChanged;
+            layout.Controls.Add(txtFilterCode);
+
+            // Project
+            layout.Controls.Add(mkLabel("Project:"));
+            cmbFilterProject = mkCombo(130);
+            cmbFilterProject.Items.Add("(All)");
+            cmbFilterProject.SelectedIndex = 0;
+            cmbFilterProject.SelectedIndexChanged += OnFilterChanged;
+            layout.Controls.Add(cmbFilterProject);
+
+            // Risk
+            layout.Controls.Add(mkLabel("Risk:"));
+            cmbFilterRisk = mkCombo(82);
+            cmbFilterRisk.Items.AddRange(new object[] { "(All)", "Low", "Medium", "High" });
+            cmbFilterRisk.SelectedIndex = 0;
+            cmbFilterRisk.SelectedIndexChanged += OnFilterChanged;
+            layout.Controls.Add(cmbFilterRisk);
+
+            // Status — strings match WarningTodoItem.StatusText exactly
+            layout.Controls.Add(mkLabel("Status:"));
+            cmbFilterStatus = mkCombo(115);
+            cmbFilterStatus.Items.AddRange(new object[]
+            {
+                "(All)",
+                "⏳ Pending", "🔄 Analyzing", "💡 Suggested",
+                "✅ Accepted", "❌ Rejected", "⚠️ Failed", "🔒 Stale"
+            });
+            cmbFilterStatus.SelectedIndex = 0;
+            cmbFilterStatus.SelectedIndexChanged += OnFilterChanged;
+            layout.Controls.Add(cmbFilterStatus);
+
+            // Clear filters
+            var btnClearFilters = new Button
+            {
+                Text      = "✕",
+                Width     = 26,
+                Height    = 22,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(80, 50, 50),
+                ForeColor = Color.White,
+                Font      = new Font("Segoe UI", 8f),
+                Margin    = new Padding(4, 2, 0, 0),
+                Cursor    = Cursors.Hand
+            };
+            btnClearFilters.FlatAppearance.BorderSize = 0;
+            btnClearFilters.Click += (s, e) =>
+            {
+                _suppressFilterEvents = true;
+                try
+                {
+                    txtFilterCode.Clear();
+                    cmbFilterProject.SelectedIndex = 0;
+                    cmbFilterRisk.SelectedIndex    = 0;
+                    cmbFilterStatus.SelectedIndex  = 0;
+                }
+                finally
+                {
+                    _suppressFilterEvents = false;
+                }
+                RefreshGrid();
+            };
+            layout.Controls.Add(btnClearFilters);
+
+            bar.Controls.Add(layout);
+            return bar;
         }
 
         private void ShowDetail(WarningTodoItem item)

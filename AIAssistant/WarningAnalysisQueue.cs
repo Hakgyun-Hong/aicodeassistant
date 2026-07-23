@@ -81,8 +81,35 @@ namespace AIAssistant
         }
 
         /// <summary>
+        /// Batch-reset a collection of items and enqueue them all for reprocessing.
+        /// Clears all LLM fields and marks each item as <see cref="WarningFixStatus.PendingAnalysis"/>.
+        /// Call <see cref="ProcessAllAsync"/> afterwards to actually run the queue.
+        /// </summary>
+        public void ResetAndEnqueue(System.Collections.Generic.IEnumerable<WarningTodoItem> items)
+        {
+            if (items == null) return;
+            foreach (var item in items)
+            {
+                if (item == null) continue;
+                item.LlmSummary     = null;
+                item.LlmExplanation = null;
+                item.OriginalSnippet= null;
+                item.ProposedSnippet= null;
+                item.UnifiedDiff    = null;
+                item.RiskLevel      = null;
+                item.FailureReason  = null;
+                item.Status         = WarningFixStatus.PendingAnalysis;
+                item.UpdatedAt      = DateTimeOffset.Now;
+                Enqueue(item);
+                Log($"[{item.Code}] ResetAndEnqueue: queued for retry.");
+            }
+            _store.NotifyChanged();
+        }
+
+        /// <summary>
         /// Process all enqueued items. Returns when all are done or cancelled.
         /// </summary>
+
         public async Task ProcessAllAsync()
         {
             // Dispose the previous token source to avoid resource leaks.
