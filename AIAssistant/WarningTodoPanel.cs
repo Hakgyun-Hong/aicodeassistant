@@ -44,6 +44,14 @@ namespace AIAssistant
         // when the grid refreshes and re-selects the same row.
         private Guid _lastNavigatedItemId = Guid.Empty;
 
+        // Refresh debounce: coalesces rapid store-change events into a single grid update.
+        // 150ms window prevents UI thrashing during bulk analysis (3 parallel workers).
+        private System.Windows.Forms.Timer _refreshDebounce;
+
+        // When true, SelectionChanged suppresses NavigateToItem
+        // (prevents file cursor jumping during programmatic grid refresh).
+        private bool _suppressNavigation;
+
         private WarningTodoStore _store;
         private WarningAnalysisQueue _analysisQueue;
 
@@ -55,6 +63,11 @@ namespace AIAssistant
 
             InitializeUI();
             BindStore();
+
+            // Debounce timer: fires 150ms after the last RefreshGrid() call.
+            // Prevents expensive DataSource-swap from running on every worker progress event.
+            _refreshDebounce = new System.Windows.Forms.Timer { Interval = 150 };
+            _refreshDebounce.Tick += (s, e) => { _refreshDebounce.Stop(); DoRefreshGrid(); };
         }
 
         private void InitializeUI()
@@ -191,7 +204,7 @@ namespace AIAssistant
 
             gridView.SelectionChanged += GridView_SelectionChanged;
             gridView.CellDoubleClick  += GridView_CellDoubleClick;
-            gridView.CellFormatting   += GridView_CellFormatting;
+            // NOTE: CellFormatting intentionally not wired (caused rendering errors on Windows).
 
             splitContainer.Panel1.Controls.Add(gridView);
             splitContainer.Panel1.BackColor = BG;
@@ -474,36 +487,6 @@ namespace AIAssistant
             dialog.ShowDialog();
         }
 
-        /// <summary>
-        /// Color-code the Status and Risk columns based on the item's current state.
-        /// Called by DataGridView for each visible cell; must be fast (no I/O).
-        /// </summary>
-        private void GridView_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
-        {
-            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
-            var item = gridView.Rows[e.RowIndex].DataBoundItem as WarningTodoItem;
-            if (item == null) return;
-
-            string col = gridView.Columns[e.ColumnIndex].Name;
-            if (col == "Risk")
-            {
-                e.CellStyle.ForeColor =
-                    item.RiskLevel == "High"   ? DANGER     :
-                    item.RiskLevel == "Medium" ? WARNING_CLR :
-                    item.RiskLevel == "Low"    ? SUCCESS     : FG;
-                e.FormattingApplied = true;
-            }
-            else if (col == "Status")
-            {
-                e.CellStyle.ForeColor =
-                    item.Status == WarningFixStatus.Suggested ? Color.FromArgb(79, 193, 255) :
-                    item.Status == WarningFixStatus.Accepted  ? SUCCESS     :
-                    item.Status == WarningFixStatus.Failed    ? DANGER      :
-                    item.Status == WarningFixStatus.Stale     ? WARNING_CLR : FG;
-                e.FormattingApplied = true;
-            }
-        }
-
         private void GridView_SelectionChanged(object sender, EventArgs e)
         {
             var item = GetSelectedItem();
@@ -514,7 +497,8 @@ namespace AIAssistant
             // Navigate VS editor to the warning location on single-click,
             // but only when a different item is selected (avoid re-navigating
             // during grid refresh that preserves the current selection).
-            if (item.Id != _lastNavigatedItemId)
+            // _suppressNavigation is set to true while DoRefreshGrid runs.
+            if (!_suppressNavigation && item.Id != _lastNavigatedItemId)
             {
                 _lastNavigatedItemId = item.Id;
                 NavigateToItem(item);
@@ -634,16 +618,69 @@ namespace AIAssistant
             };
         }
 
+        /// <summary>
+        /// Debounced entry point for grid refresh. Coalesces rapid calls (e.g., from
+        /// parallel worker progress events) into a single actual update 150ms after
+        /// the last call. This prevents UI thrashing during bulk analysis.
+        /// </summary>
         private void RefreshGrid()
+        {
+            // Restart the timer — if called again within 150ms the clock resets.
+            _refreshDebounce.Stop();
+            _refreshDebounce.Start();
+        }
+
+        /// <summary>
+        /// Performs the actual DataGridView rebind. Preserves the selected item
+        /// and suppresses VS navigation so the cursor doesn't jump on every update.
+        /// </summary>
+        private void DoRefreshGrid()
         {
             try
             {
-                RefreshProjectFilter();
+                // ① Remember what was selected BEFORE the DataSource swap.
+                //    DataSource = null clears selection, so we must capture the Id first.
+                Guid prevId = GetSelectedItem()?.Id ?? Guid.Empty;
 
-                var filtered = GetFilteredItems().ToList();
-                gridView.DataSource = null;
-                gridView.DataSource = filtered;
-                gridView.Refresh();
+                // ② Suppress navigation for the entire rebind sequence.
+                //    Without this flag, each SelectionChanged event during the swap
+                //    would call NavigateToItem and jump the VS cursor.
+                _suppressNavigation = true;
+                try
+                {
+                    RefreshProjectFilter();
+
+                    var filtered = GetFilteredItems().ToList();
+                    gridView.DataSource = null;
+                    gridView.DataSource = filtered;
+                    gridView.Refresh();
+
+                    // ③ Restore the previous selection (same object, different list position).
+                    if (prevId != Guid.Empty)
+                    {
+                        for (int i = 0; i < gridView.Rows.Count; i++)
+                        {
+                            if ((gridView.Rows[i].DataBoundItem as WarningTodoItem)?.Id == prevId)
+                            {
+                                gridView.ClearSelection();
+                                gridView.Rows[i].Selected = true;
+
+                                // Keep the row visible if it's scrolled off-screen.
+                                int firstVisible = gridView.FirstDisplayedScrollingRowIndex;
+                                int visibleCount  = gridView.DisplayedRowCount(false);
+                                if (i < firstVisible || i >= firstVisible + visibleCount)
+                                    gridView.FirstDisplayedScrollingRowIndex = Math.Max(0, i - 2);
+
+                                break;
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    // ④ Restore navigation AFTER selection is settled.
+                    _suppressNavigation = false;
+                }
             }
             catch { }
         }
