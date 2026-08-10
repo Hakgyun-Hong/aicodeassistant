@@ -93,11 +93,14 @@ namespace AIAssistant
             var btnAnalyzeAll = CreateToolButton("⚡ Analyze All", Color.FromArgb(79, 60, 120));
             btnAnalyzeAll.Click += BtnAnalyzeAll_Click;
 
+            var btnAnalyzeSelected = CreateToolButton("🎯 Analyze Selected", Color.FromArgb(60, 80, 120));
+            btnAnalyzeSelected.Click += BtnAnalyzeSelected_Click;
+
             var btnClear = CreateToolButton("🧹 Clear", BORDER);
             btnClear.Click += BtnClear_Click;
 
             var btnCancel = CreateToolButton("⏹ Cancel", Color.FromArgb(100, 50, 50));
-            btnCancel.Click += (s, e) => _analysisQueue.Cancel();
+            btnCancel.Click += BtnCancel_Click;
 
             // Bulk-retry items that Failed or went Stale
             var btnRetryFailed = CreateToolButton("🔄 Retry Failed", Color.FromArgb(90, 60, 30));
@@ -105,6 +108,7 @@ namespace AIAssistant
 
             toolbar.Controls.Add(btnScan);
             toolbar.Controls.Add(btnAnalyzeAll);
+            toolbar.Controls.Add(btnAnalyzeSelected);
             toolbar.Controls.Add(btnCancel);
             toolbar.Controls.Add(btnClear);
             toolbar.Controls.Add(btnRetryFailed);
@@ -156,6 +160,7 @@ namespace AIAssistant
                 CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
                 ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = true,    // Allow Ctrl/Shift multi-select for Analyze Selected
                 ReadOnly = true,
                 AllowUserToAddRows = false,
                 AllowUserToDeleteRows = false,
@@ -369,6 +374,89 @@ namespace AIAssistant
             }));
         }
 
+        /// <summary>
+        /// Analyze only the items currently selected in the DataGridView.
+        /// Supports multi-select (Ctrl+Click / Shift+Click) for batch selection.
+        /// Items that are not in PendingAnalysis/Failed/Stale status are skipped.
+        /// </summary>
+        private async void BtnAnalyzeSelected_Click(object sender, EventArgs e)
+        {
+            if (gridView.SelectedRows.Count == 0)
+            {
+                lblStatus.Text = "⚠️ No rows selected. Select one or more warnings first.";
+                return;
+            }
+
+            // Collect selected items that are eligible for (re-)analysis.
+            var selected = new System.Collections.Generic.List<WarningTodoItem>();
+            foreach (DataGridViewRow row in gridView.SelectedRows)
+            {
+                var item = row.DataBoundItem as WarningTodoItem;
+                if (item == null) continue;
+
+                // Allow Pending, Failed, Stale, or even previously Suggested/Rejected items
+                // to be explicitly re-analyzed on user request.
+                if (item.Status == WarningFixStatus.Analyzing) continue; // already in flight
+                if (item.Status == WarningFixStatus.Accepted)  continue; // already applied
+
+                selected.Add(item);
+            }
+
+            if (selected.Count == 0)
+            {
+                lblStatus.Text = "ℹ️ Selected items are already analyzed or accepted.";
+                return;
+            }
+
+            lblStatus.Text = $"🎯 Analyzing {selected.Count} selected warning(s)...";
+
+            // Reset LLM fields for items that had prior results (re-analyze case)
+            _analysisQueue.ResetAndEnqueue(selected);
+            RefreshGrid();
+
+            await _analysisQueue.ProcessAllAsync();
+
+            try
+            {
+                this.Invoke((Action)(() =>
+                {
+                    RefreshGrid();
+                    lblStatus.Text = $"Selected analysis complete. {_store.GetStatusSummary()}";
+                }));
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Cancel all in-flight LLM analysis, drain the queue, and
+        /// revert any items that were stuck in Analyzing back to PendingAnalysis.
+        /// </summary>
+        private void BtnCancel_Click(object sender, EventArgs e)
+        {
+            _analysisQueue.Cancel();
+
+            // Revert items that got marked Analyzing but never completed.
+            int reverted = 0;
+            foreach (var item in _store.Items)
+            {
+                if (item.Status == WarningFixStatus.Analyzing)
+                {
+                    item.Status = WarningFixStatus.PendingAnalysis;
+                    item.FailureReason = null;
+                    item.UpdatedAt = DateTimeOffset.Now;
+                    reverted++;
+                }
+            }
+
+            if (reverted > 0)
+                _store.NotifyChanged();
+
+            RefreshGrid();
+            lblStatus.Text = reverted > 0
+                ? $"⏹ Cancelled. {reverted} item(s) reverted to Pending."
+                : "⏹ Cancelled.";
+        }
+
         private void BtnClear_Click(object sender, EventArgs e)
         {
             _store.Clear();
@@ -411,39 +499,94 @@ namespace AIAssistant
 
         private void BtnAccept_Click(object sender, EventArgs e)
         {
-            var item = GetSelectedItem();
-            if (item == null || item.Status != WarningFixStatus.Suggested) return;
-
-            string error = WarningFixApplier.Apply(item);
-            if (error == null)
+            // Collect all selected items that are in Suggested state.
+            var targets = new System.Collections.Generic.List<WarningTodoItem>();
+            foreach (DataGridViewRow row in gridView.SelectedRows)
             {
-                lblStatus.Text = $"✅ Fix applied to {item.ShortFilePath}. Backup saved as .warningfix.bak";
-                _store.NotifyChanged();
+                var item = row.DataBoundItem as WarningTodoItem;
+                if (item != null && item.Status == WarningFixStatus.Suggested)
+                    targets.Add(item);
+            }
 
-                // Navigate to the fix location so the user can immediately review
-                // the change. Reset the last-navigated ID so NavigateToItem runs
-                // even though the same item is still selected.
+            if (targets.Count == 0)
+            {
+                lblStatus.Text = "ℹ️ No suggested fixes selected to apply.";
+                return;
+            }
+
+            // When applying multiple fixes in the SAME file, earlier fixes shift line
+            // offsets for later ones.  Sort by file path then by LINE DESCENDING so
+            // bottom-of-file fixes are applied first (their offsets won't be affected
+            // by changes above them).
+            targets.Sort((a, b) =>
+            {
+                int cmp = string.Compare(a.FilePath, b.FilePath, StringComparison.OrdinalIgnoreCase);
+                if (cmp != 0) return cmp;
+                return b.Line.CompareTo(a.Line); // descending line order within same file
+            });
+
+            int ok = 0, fail = 0;
+            string lastError = null;
+            WarningTodoItem lastApplied = null;
+
+            foreach (var item in targets)
+            {
+                string error = WarningFixApplier.Apply(item);
+                if (error == null)
+                {
+                    ok++;
+                    lastApplied = item;
+                }
+                else
+                {
+                    fail++;
+                    lastError = error;
+                }
+            }
+
+            _store.NotifyChanged();
+
+            // Navigate to the last successfully applied item.
+            if (lastApplied != null)
+            {
                 _lastNavigatedItemId = Guid.Empty;
-                NavigateToItem(item);
+                NavigateToItem(lastApplied);
             }
+
+            // Status summary
+            if (fail == 0)
+                lblStatus.Text = ok == 1
+                    ? $"✅ Fix applied to {targets[0].ShortFilePath}. Backup saved."
+                    : $"✅ {ok} fixes applied successfully. Backups saved.";
             else
-            {
-                lblStatus.Text = $"⚠️ {error}";
-            }
+                lblStatus.Text = ok == 0
+                    ? $"⚠️ All {fail} fix(es) failed. Last error: {lastError}"
+                    : $"⚠️ {ok} applied, {fail} failed. Last error: {lastError}";
 
             RefreshGrid();
-            ShowDetail(item);
+
+            // Show detail for the first selected item (or last applied).
+            var detailItem = lastApplied ?? targets[0];
+            ShowDetail(detailItem);
         }
 
         private void BtnReject_Click(object sender, EventArgs e)
         {
-            var item = GetSelectedItem();
-            if (item == null) return;
+            int count = 0;
+            foreach (DataGridViewRow row in gridView.SelectedRows)
+            {
+                var item = row.DataBoundItem as WarningTodoItem;
+                if (item == null) continue;
+                if (item.Status == WarningFixStatus.Accepted) continue; // don't un-accept
 
-            _store.Reject(item);
+                _store.Reject(item);
+                count++;
+            }
+
             RefreshGrid();
-            ShowDetail(item);
-            lblStatus.Text = $"❌ Rejected fix for {item.Code} in {item.ShortFilePath}";
+            lblStatus.Text = count == 1
+                ? $"❌ Rejected fix for selected item."
+                : $"❌ Rejected {count} item(s).";
         }
 
         private async void BtnReanalyze_Click(object sender, EventArgs e)
@@ -800,15 +943,38 @@ namespace AIAssistant
                 Font      = new Font("Segoe UI", 8.5f)
             };
 
-            Func<int, ComboBox> mkCombo = width => new ComboBox
+            Func<int, ComboBox> mkCombo = width =>
             {
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Width         = width,
-                FlatStyle     = FlatStyle.Flat,
-                BackColor     = Color.FromArgb(50, 50, 60),
-                ForeColor     = Color.White,
-                Font          = new Font("Segoe UI", 8.5f),
-                Margin        = new Padding(0, 2, 8, 0)
+                var cmb = new ComboBox
+                {
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Width         = width,
+                    FlatStyle     = FlatStyle.Flat,
+                    BackColor     = Color.FromArgb(50, 50, 60),
+                    ForeColor     = Color.White,
+                    Font          = new Font("Segoe UI", 8.5f),
+                    Margin        = new Padding(0, 2, 8, 0)
+                };
+
+                // Auto-expand dropdown width to fit the longest item text.
+                // Measured on each open so dynamically-added items (e.g. Project list) are covered.
+                cmb.DropDown += (s, ev) =>
+                {
+                    var cb = (ComboBox)s;
+                    int maxWidth = cb.Width;
+                    using (var g = cb.CreateGraphics())
+                    {
+                        foreach (var item in cb.Items)
+                        {
+                            int w = (int)g.MeasureString(item.ToString(), cb.Font).Width
+                                    + SystemInformation.VerticalScrollBarWidth + 4;
+                            if (w > maxWidth) maxWidth = w;
+                        }
+                    }
+                    cb.DropDownWidth = maxWidth;
+                };
+
+                return cmb;
             };
 
             // Code / Message search

@@ -37,9 +37,17 @@ namespace AIAssistant
             Interlocked.Increment(ref _totalEnqueued);
         }
 
+        /// <summary>
+        /// Signal cancellation to all in-flight tasks and drain the queue
+        /// so that remaining items are not processed by a subsequent ProcessAllAsync.
+        /// Callers should revert any Analyzing items to PendingAnalysis on the UI side.
+        /// </summary>
         public void Cancel()
         {
             _cts?.Cancel();
+
+            // Drain unprocessed items from the queue so they don't run later.
+            while (_queue.TryDequeue(out _)) { }
         }
 
         /// <summary>
