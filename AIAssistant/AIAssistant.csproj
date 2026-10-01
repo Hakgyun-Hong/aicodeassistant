@@ -84,6 +84,16 @@
     <Compile Include="SamTodoPanel.cs" />
     <Compile Include="SamTodoToolWindow.cs" />
     <Compile Include="OpenSamTodoCommand.cs" />
+    <Compile Include="ManualModels.cs" />
+    <Compile Include="UiInspector.cs" />
+    <Compile Include="ScreenCaptureEngine.cs" />
+    <Compile Include="SourceAnalyzer.cs" />
+    <Compile Include="UiSourceMapper.cs" />
+    <Compile Include="ManualGenerator.cs" />
+    <Compile Include="ManualExporter.cs" />
+    <Compile Include="ManualEditorPanel.cs" />
+    <Compile Include="ManualToolWindow.cs" />
+    <Compile Include="OpenManualCommand.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="source.extension.vsixmanifest">
@@ -91,6 +101,8 @@
     </None>
   </ItemGroup>
   <ItemGroup>
+    <Reference Include="UIAutomationClient" />
+    <Reference Include="UIAutomationTypes" />
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System" />
     <Reference Include="System.Data" />

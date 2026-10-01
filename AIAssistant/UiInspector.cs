@@ -1,0 +1,432 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Windows.Automation;
+
+namespace AIAssistant
+{
+    /// <summary>
+    /// UI Automation Client — inspects a running WPF process from outside.
+    /// Uses System.Windows.Automation (UIAutomationClient.dll) via Control View Walker
+    /// to suppress layout-only elements (Grid, Border, Panel, Decorator).
+    ///
+    /// Two modes:
+    ///   CurrentScreen — single pass on the currently-visible window.
+    ///   FullApp       — auto-crawl all windows + Tab/TabItem navigation.
+    /// </summary>
+    public static class UiInspector
+    {
+        // Layout-only control types to suppress (ControlType IDs)
+        private static readonly HashSet<int> SuppressedTypes = new HashSet<int>
+        {
+            ControlType.Custom.Id,          // anonymous containers
+            ControlType.Group.Id,           // GroupBox interior
+            ControlType.Pane.Id,            // scroll/dock panes (often layout-only)
+            ControlType.Separator.Id,
+            ControlType.ScrollBar.Id,
+            ControlType.Thumb.Id,
+            ControlType.TitleBar.Id,
+        };
+
+        // ─── Public API ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Get all WPF processes visible to the user (have at least one window).
+        /// Returns (ProcessId, ProcessName, MainWindowTitle) tuples.
+        /// </summary>
+        public static List<(int Pid, string Name, string Title, IntPtr Hwnd)> GetWpfProcesses()
+        {
+            var result = new List<(int, string, string, IntPtr)>();
+            foreach (var proc in Process.GetProcesses())
+            {
+                try
+                {
+                    if (proc.MainWindowHandle == IntPtr.Zero) continue;
+                    if (string.IsNullOrWhiteSpace(proc.MainWindowTitle)) continue;
+
+                    // Skip system processes
+                    string lower = proc.ProcessName.ToLower();
+                    if (lower == "devenv" || lower == "explorer" || lower == "taskhostw"
+                        || lower == "searchui" || lower == "dwm") continue;
+
+                    result.Add((proc.Id, proc.ProcessName, proc.MainWindowTitle, proc.MainWindowHandle));
+                }
+                catch { /* access denied — skip */ }
+            }
+            return result.OrderBy(p => p.Name).ToList();
+        }
+
+        /// <summary>
+        /// CurrentScreen mode: collect UI elements from the given window handle (single pass).
+        /// </summary>
+        public static WindowSnapshot CaptureCurrentScreen(IntPtr hwnd, string tempDir)
+        {
+            var root = SafeFromHandle(hwnd);
+            if (root == null) return null;
+
+            var snapshot = new WindowSnapshot
+            {
+                Handle = hwnd,
+                WindowTitle = SafeGet(root, AutomationElement.NameProperty, "")
+            };
+
+            // Capture screenshot first (before tree walk to minimize delay)
+            snapshot.ScreenshotPath = ScreenCaptureEngine.CaptureWindow(hwnd, tempDir, "screen_raw");
+            snapshot.WindowRect     = GetWindowRect(root);
+
+            // Walk UI tree
+            snapshot.Elements = WalkControlView(root, null, 0);
+
+            // Score importance + assign callout numbers
+            AssignCallouts(snapshot);
+
+            // Annotate screenshot
+            snapshot.AnnotatedPath = ScreenCaptureEngine.AnnotateScreenshot(
+                snapshot.ScreenshotPath, snapshot.Callouts, snapshot.WindowRect, tempDir, "screen_ann");
+
+            return snapshot;
+        }
+
+        /// <summary>
+        /// FullApp mode: enumerate all windows of the process, auto-navigate tabs, collect all snapshots.
+        /// </summary>
+        public static List<WindowSnapshot> CaptureFullApp(IntPtr mainHwnd, string tempDir,
+            Action<string> progress = null)
+        {
+            var snapshots = new List<WindowSnapshot>();
+
+            // Step 1 — collect all top-level windows of this process
+            int pid = GetProcessId(mainHwnd);
+            var windows = GetAllWindowsForProcess(pid);
+
+            int snapshotIndex = 0;
+            foreach (var hwnd in windows)
+            {
+                var root = SafeFromHandle(hwnd);
+                if (root == null) continue;
+
+                string winTitle = SafeGet(root, AutomationElement.NameProperty, "");
+                if (string.IsNullOrWhiteSpace(winTitle)) continue;
+
+                progress?.Invoke($"Capturing: {winTitle}");
+
+                // Capture the window at its current state
+                string tag = $"win{snapshotIndex++}";
+                var snap = CaptureSingleWindow(root, hwnd, winTitle, null, tag, tempDir);
+                snapshots.Add(snap);
+
+                // Step 2 — find TabControl and navigate each TabItem
+                var tabControls = FindAll(root, ControlType.Tab);
+                foreach (var tabCtrl in tabControls)
+                {
+                    var tabItems = FindAll(tabCtrl, ControlType.TabItem);
+                    foreach (var tabItem in tabItems)
+                    {
+                        string tabName = SafeGet(tabItem, AutomationElement.NameProperty, "");
+                        if (string.IsNullOrWhiteSpace(tabName)) continue;
+
+                        // Click the tab
+                        if (TryInvoke(tabItem) || TrySelect(tabItem))
+                        {
+                            System.Threading.Thread.Sleep(400); // let UI render
+                            progress?.Invoke($"  Tab: {winTitle} › {tabName}");
+
+                            tag = $"win{snapshotIndex++}";
+                            var tabSnap = CaptureSingleWindow(root, hwnd, winTitle, tabName, tag, tempDir);
+                            snapshots.Add(tabSnap);
+                        }
+                    }
+                }
+            }
+
+            return snapshots;
+        }
+
+        // ─── Private: single-window capture ──────────────────────────────────
+
+        private static WindowSnapshot CaptureSingleWindow(AutomationElement root, IntPtr hwnd,
+            string winTitle, string tabContext, string tag, string tempDir)
+        {
+            var snapshot = new WindowSnapshot
+            {
+                Handle      = hwnd,
+                WindowTitle = winTitle,
+                TabContext  = tabContext,
+                WindowRect  = GetWindowRect(root)
+            };
+            snapshot.ScreenshotPath = ScreenCaptureEngine.CaptureWindow(hwnd, tempDir, $"{tag}_raw");
+            snapshot.Elements = WalkControlView(root, null, 0);
+
+            // Propagate tab/window context
+            foreach (var el in snapshot.Elements)
+            {
+                el.WindowTitle = winTitle;
+                el.TabContext  = tabContext;
+            }
+
+            AssignCallouts(snapshot);
+            snapshot.AnnotatedPath = ScreenCaptureEngine.AnnotateScreenshot(
+                snapshot.ScreenshotPath, snapshot.Callouts, snapshot.WindowRect,
+                tempDir, $"{tag}_ann");
+            return snapshot;
+        }
+
+        // ─── Private: UI tree walk ────────────────────────────────────────────
+
+        private static List<UiElementInfo> WalkControlView(
+            AutomationElement root, string parentId, int depth)
+        {
+            var results = new List<UiElementInfo>();
+            if (root == null || depth > 12) return results;
+
+            var walker = TreeWalker.ControlViewWalker;
+            AutomationElement child;
+            try { child = walker.GetFirstChild(root); }
+            catch { return results; }
+
+            while (child != null)
+            {
+                try
+                {
+                    var info = BuildElementInfo(child, parentId, depth);
+                    if (info != null)
+                    {
+                        results.Add(info);
+                        // Recurse
+                        var descendants = WalkControlView(child, info.UniqueId, depth + 1);
+                        results.AddRange(descendants);
+                    }
+                }
+                catch { /* skip corrupt elements */ }
+
+                try { child = walker.GetNextSibling(child); }
+                catch { break; }
+            }
+            return results;
+        }
+
+        private static UiElementInfo BuildElementInfo(AutomationElement el, string parentId, int depth)
+        {
+            AutomationElement.AutomationElementInformation cur;
+            try { cur = el.Current; }
+            catch { return null; }
+
+            // Skip offscreen elements
+            if (cur.IsOffscreen) return null;
+
+            // Skip purely decorative types
+            if (SuppressedTypes.Contains(cur.ControlType.Id)) return null;
+
+            // Skip zero-size elements
+            var rect = cur.BoundingRectangle;
+            if (rect.Width < 2 || rect.Height < 2) return null;
+
+            var info = new UiElementInfo
+            {
+                Name          = cur.Name ?? "",
+                AutomationId  = cur.AutomationId ?? "",
+                ClassName     = cur.ClassName ?? "",
+                ControlType   = cur.ControlType.ProgrammaticName
+                                    .Replace("ControlType.", "")
+                                    .ToLowerInvariant(),
+                IsEnabled     = cur.IsEnabled,
+                IsOffscreen   = cur.IsOffscreen,
+                HasKeyboardFocus = cur.HasKeyboardFocus,
+                HelpText      = cur.HelpText ?? "",
+                BoundingRectangle = new System.Windows.Rect(rect.Left, rect.Top, rect.Width, rect.Height),
+                ParentId      = parentId,
+                Depth         = depth
+            };
+
+            // ValuePattern
+            if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object vp))
+                info.Value = ((ValuePattern)vp).Current.Value;
+
+            // SupportedPatterns
+            foreach (var pid in el.GetSupportedPatterns())
+                info.SupportedPatterns.Add(pid.ProgrammaticName.Replace("PatternIdentifiers.", "").Replace("Pattern", ""));
+
+            // ImportanceScore
+            info.ImportanceScore = ComputeImportance(info, el);
+
+            return info;
+        }
+
+        // ─── Importance scoring ───────────────────────────────────────────────
+
+        private static int ComputeImportance(UiElementInfo info, AutomationElement el)
+        {
+            int score = 0;
+            string ct = info.ControlType;
+
+            // High-value interactive types
+            if (ct == "button")        score += 4;
+            if (ct == "comboBox")      score += 4;
+            if (ct == "edit")          score += 3;
+            if (ct == "checkBox")      score += 3;
+            if (ct == "radioButton")   score += 3;
+            if (ct == "listItem")      score += 2;
+            if (ct == "tabItem")       score += 3;
+            if (ct == "menuItem")      score += 3;
+            if (ct == "dataItem")      score += 2;
+            if (ct == "treeItem")      score += 2;
+            if (ct == "slider")        score += 3;
+            if (ct == "hyperlink")     score += 2;
+
+            // Informational
+            if (ct == "text")          score += 1;
+            if (ct == "image")         score += 1;
+
+            // Pattern-based bonuses
+            if (info.SupportedPatterns.Contains("Invoke"))          score += 2;
+            if (info.SupportedPatterns.Contains("Value"))           score += 1;
+            if (info.SupportedPatterns.Contains("ExpandCollapse"))  score += 1;
+            if (info.SupportedPatterns.Contains("Toggle"))          score += 1;
+
+            // State bonuses
+            if (!info.IsEnabled)       score -= 1;  // disabled but still worth noting
+            if (!string.IsNullOrEmpty(info.Name)) score += 1;
+            if (!string.IsNullOrEmpty(info.AutomationId)) score += 2;
+            if (!string.IsNullOrEmpty(info.HelpText))  score += 1;
+
+            // Penalty for anonymous/unnamed elements
+            if (string.IsNullOrEmpty(info.Name) && string.IsNullOrEmpty(info.AutomationId))
+                score -= 2;
+
+            return Math.Max(0, score);
+        }
+
+        // ─── Callout assignment ────────────────────────────────────────────────
+
+        private static void AssignCallouts(WindowSnapshot snapshot)
+        {
+            // Sort by importance descending, then top-to-bottom
+            var worthy = snapshot.Elements
+                .Where(e => e.ImportanceScore >= 3 && !e.IsOffscreen)
+                .OrderByDescending(e => e.ImportanceScore)
+                .ThenBy(e => e.BoundingRectangle.Top)
+                .ThenBy(e => e.BoundingRectangle.Left)
+                .Take(25)  // max 25 callouts per screen (readability)
+                .ToList();
+
+            int num = 1;
+            foreach (var el in worthy)
+            {
+                el.CalloutNumber = num;
+                snapshot.Callouts.Add(new CalloutItem
+                {
+                    Number    = num,
+                    ElementId = el.UniqueId,
+                    Label     = string.IsNullOrEmpty(el.Name) ? el.ControlType : el.Name,
+                    Rect      = el.BoundingRectangle
+                });
+                num++;
+            }
+        }
+
+        // ─── Helpers ──────────────────────────────────────────────────────────
+
+        private static List<IntPtr> GetAllWindowsForProcess(int pid)
+        {
+            var handles = new List<IntPtr>();
+            // Use EnumWindows via user32
+            NativeMethods.EnumWindows((hwnd, _) =>
+            {
+                NativeMethods.GetWindowThreadProcessId(hwnd, out uint procId);
+                if ((int)procId == pid && NativeMethods.IsWindowVisible(hwnd))
+                    handles.Add(hwnd);
+                return true;
+            }, IntPtr.Zero);
+            return handles;
+        }
+
+        private static int GetProcessId(IntPtr hwnd)
+        {
+            NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
+            return (int)pid;
+        }
+
+        private static AutomationElement SafeFromHandle(IntPtr hwnd)
+        {
+            try { return AutomationElement.FromHandle(hwnd); }
+            catch { return null; }
+        }
+
+        private static T SafeGet<T>(AutomationElement el, AutomationProperty prop, T defaultValue)
+        {
+            try { return (T)el.GetCurrentPropertyValue(prop); }
+            catch { return defaultValue; }
+        }
+
+        private static System.Windows.Rect GetWindowRect(AutomationElement el)
+        {
+            try
+            {
+                var r = el.Current.BoundingRectangle;
+                return new System.Windows.Rect(r.Left, r.Top, r.Width, r.Height);
+            }
+            catch { return default; }
+        }
+
+        private static List<AutomationElement> FindAll(AutomationElement root, ControlType type)
+        {
+            var result = new List<AutomationElement>();
+            try
+            {
+                var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, type);
+                foreach (AutomationElement el in root.FindAll(TreeScope.Descendants, cond))
+                    result.Add(el);
+            }
+            catch { }
+            return result;
+        }
+
+        private static bool TryInvoke(AutomationElement el)
+        {
+            if (el.TryGetCurrentPattern(InvokePattern.Pattern, out object p))
+            {
+                try { ((InvokePattern)p).Invoke(); return true; }
+                catch { }
+            }
+            return false;
+        }
+
+        private static bool TrySelect(AutomationElement el)
+        {
+            if (el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out object p))
+            {
+                try { ((SelectionItemPattern)p).Select(); return true; }
+                catch { }
+            }
+            return false;
+        }
+    }
+
+    /// <summary>P/Invoke declarations for window enumeration.</summary>
+    internal static class NativeMethods
+    {
+        public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(IntPtr hwnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern uint GetDpiForWindow(IntPtr hwnd);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct RECT { public int Left, Top, Right, Bottom; }
+    }
+}

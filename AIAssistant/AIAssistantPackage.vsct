@@ -116,6 +116,15 @@
           <ButtonText>📊 SAM Fix Assistant</ButtonText>
         </Strings>
       </Button>
+
+      <Button guid="guidAIAssistantPackageCmdSet" id="cmdidOpenManual" priority="0x0500" type="Button">
+        <Parent guid="guidAIAssistantPackageCmdSet" id="AIAssistantMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="Document" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>📖 WPF Auto Manual Generator</ButtonText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -140,6 +149,7 @@
       <IDSymbol name="cmdidSettings"         value="0x0107" />
       <IDSymbol name="cmdidOpenWarningTodo"  value="0x0108" />
       <IDSymbol name="cmdidOpenSamTodo"      value="0x0120" />
+      <IDSymbol name="cmdidOpenManual"       value="0x0130" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>
