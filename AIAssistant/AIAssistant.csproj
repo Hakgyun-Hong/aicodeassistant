@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <MinimumVisualStudioVersion>17.0</MinimumVisualStudioVersion>
@@ -77,6 +77,13 @@
     <Compile Include="WarningTodoStore.cs" />
     <Compile Include="WarningTodoToolWindow.cs" />
     <Compile Include="OpenWarningTodoCommand.cs" />
+    <Compile Include="SamTodoItem.cs" />
+    <Compile Include="SamTodoStore.cs" />
+    <Compile Include="SamReportParser.cs" />
+    <Compile Include="SamAnalysisQueue.cs" />
+    <Compile Include="SamTodoPanel.cs" />
+    <Compile Include="SamTodoToolWindow.cs" />
+    <Compile Include="OpenSamTodoCommand.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="source.extension.vsixmanifest">
