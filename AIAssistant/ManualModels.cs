@@ -146,7 +146,9 @@ namespace AIAssistant
 
         // Screenshot block fields
         public string ScreenshotPath         { get; set; }   // path to annotated PNG
+        public string RawScreenshotPath      { get; set; }   // path to raw (no annotations) PNG
         public List<CalloutItem> Callouts    { get; set; } = new List<CalloutItem>();
+        public bool   ShowCallouts           { get; set; } = true;  // toggle callout visibility
 
         // Control item fields
         public string ElementUniqueId        { get; set; }
@@ -212,6 +214,7 @@ namespace AIAssistant
         public IntPtr Handle           { get; set; }
         public string ScreenshotPath   { get; set; }   // raw screenshot (no annotations)
         public string AnnotatedPath    { get; set; }   // screenshot with callouts
+        public bool   ShowCallouts     { get; set; } = true;
         public List<UiElementInfo> Elements { get; set; } = new List<UiElementInfo>();
         public List<CalloutItem>   Callouts { get; set; } = new List<CalloutItem>();
         public System.Windows.Rect WindowRect { get; set; }

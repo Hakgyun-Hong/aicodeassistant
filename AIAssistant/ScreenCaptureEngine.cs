@@ -115,6 +115,51 @@ namespace AIAssistant
             }
         }
 
+        /// <summary>
+        /// Returns an in-memory annotated Bitmap (no file I/O).
+        /// Used by ManualEditorPanel for dynamic callout editing preview.
+        /// If callouts is null or empty, returns a clean copy of the raw screenshot.
+        /// </summary>
+        public static Bitmap RenderAnnotatedBitmap(
+            string rawScreenshotPath,
+            List<CalloutItem> callouts,
+            System.Windows.Rect windowRect,
+            bool showCallouts)
+        {
+            if (string.IsNullOrEmpty(rawScreenshotPath) || !File.Exists(rawScreenshotPath))
+                return null;
+
+            try
+            {
+                using (var src = Image.FromFile(rawScreenshotPath) as Bitmap)
+                {
+                    if (src == null) return null;
+
+                    var result = new Bitmap(src);
+
+                    if (!showCallouts || callouts == null || callouts.Count == 0)
+                        return result;
+
+                    double dpiX = result.Width  / Math.Max(1, windowRect.Width);
+                    double dpiY = result.Height / Math.Max(1, windowRect.Height);
+                    if (dpiX < 0.5 || dpiX > 4.0) dpiX = 1.0;
+                    if (dpiY < 0.5 || dpiY > 4.0) dpiY = 1.0;
+
+                    using (var g = Graphics.FromImage(result))
+                    {
+                        g.SmoothingMode     = SmoothingMode.AntiAlias;
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                        foreach (var callout in callouts)
+                            DrawCallout(g, callout, windowRect, dpiX, dpiY);
+                    }
+
+                    return result;
+                }
+            }
+            catch { return null; }
+        }
+
         // ─── Private: drawing ──────────────────────────────────────────────────
 
         private static readonly Color[] CalloutColors =

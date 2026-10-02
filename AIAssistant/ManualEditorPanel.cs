@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -11,54 +12,61 @@ using Microsoft.VisualStudio.Shell;
 namespace AIAssistant
 {
     /// <summary>
-    /// WPF Auto Manual Generator — main editor panel.
+    /// WPF Auto Manual Generator — Trupeer/StepHow-inspired card-based editor.
     ///
-    /// Layout:
-    ///   [Toolbar] Mode selector | Process ComboBox | Capture | Generate | Export DOCX | Cancel
-    ///   ┌────────────────────┬────────────────────────────────────────┐
-    ///   │  TreeView          │  TOP: annotated screenshot (PictureBox) │
-    ///   │  (document blocks) │  BOT: block description (RichTextBox)  │
-    ///   └────────────────────┴────────────────────────────────────────┘
-    ///   [Status Bar]
+    /// Design philosophy:
+    ///   - Each captured screen is a "Step Card" with screenshot + callout overlay + description
+    ///   - Cards are vertically scrollable in a single-column flow
+    ///   - Callouts are dynamically editable (insert/delete/toggle per card)
+    ///   - Clean dark card aesthetic with rounded borders and subtle accents
+    ///   - Inline text editing (click to edit title/description)
+    ///   - Context actions per card (regenerate, move, delete, callout editor)
     ///
-    /// Two capture modes (toolbar toggle):
-    ///   CurrentScreen — single snapshot of selected window
-    ///   FullApp       — auto-navigate all windows + tabs
+    /// Capture modes:
+    ///   📸 Current Screen — single snapshot of the selected window
+    ///   🌐 Full App       — auto-crawl all windows + Tab/Menu/Tree/List navigation
     /// </summary>
     public sealed class ManualEditorPanel : UserControl
     {
-        // ─── Colors ──────────────────────────────────────────────────────────
-        private static readonly Color BG     = Color.FromArgb(28, 28, 38);
-        private static readonly Color BG2    = Color.FromArgb(35, 35, 48);
-        private static readonly Color FG     = Color.FromArgb(220, 220, 230);
-        private static readonly Color ACCENT = Color.FromArgb(86, 156, 214);
-        private static readonly Color BORDER = Color.FromArgb(60, 60, 80);
-        private static readonly Color GREEN  = Color.FromArgb(60, 120, 60);
+        // ─── Theme: dark card design inspired by Trupeer/StepHow ──────────
+        private static readonly Color CLR_BG           = Color.FromArgb(22, 22, 30);    // deepest background
+        private static readonly Color CLR_CARD         = Color.FromArgb(32, 34, 44);    // card surface
+        private static readonly Color CLR_CARD_HOVER   = Color.FromArgb(38, 40, 52);    // card hover
+        private static readonly Color CLR_CARD_BORDER  = Color.FromArgb(52, 56, 72);    // card border
+        private static readonly Color CLR_TEXT          = Color.FromArgb(225, 228, 235); // primary text
+        private static readonly Color CLR_TEXT_DIM      = Color.FromArgb(130, 135, 155); // secondary text
+        private static readonly Color CLR_ACCENT       = Color.FromArgb(88, 138, 255);  // blue accent (step numbers)
+        private static readonly Color CLR_ACCENT2      = Color.FromArgb(60, 190, 120);  // green accent (generate)
+        private static readonly Color CLR_DANGER       = Color.FromArgb(220, 60, 60);   // red (delete)
+        private static readonly Color CLR_TOOLBAR      = Color.FromArgb(26, 28, 36);    // toolbar bg
+        private static readonly Color CLR_INPUT        = Color.FromArgb(40, 42, 54);    // input bg
 
-        // ─── Controls ─────────────────────────────────────────────────────────
-        private ComboBox        cmbProcess;
-        private ComboBox        cmbMode;
-        private Button          btnRefreshProcesses;
-        private Button          btnCapture;
-        private Button          btnGenerate;
-        private Button          btnExport;
-        private Button          btnCancel;
-        private TreeView        treeDoc;
-        private PictureBox      picScreenshot;
-        private RichTextBox     txtDetail;
-        private Label           lblStatus;
-        private ProgressBar     progressBar;
+        private static readonly Font FNT_STEP_NUM     = new Font("Segoe UI", 14f, FontStyle.Bold);
+        private static readonly Font FNT_TITLE        = new Font("Segoe UI Semibold", 11f);
+        private static readonly Font FNT_BODY         = new Font("Segoe UI", 9.5f);
+        private static readonly Font FNT_SMALL        = new Font("Segoe UI", 8.5f);
+        private static readonly Font FNT_BTN          = new Font("Segoe UI", 8.5f);
 
-        // ─── State ────────────────────────────────────────────────────────────
+        // ─── Controls ─────────────────────────────────────────────────────
+        private FlowLayoutPanel     pnlToolbar;
+        private Panel               pnlCards;         // scrollable card container
+        private Label               lblStatus;
+        private ProgressBar         progressBar;
+        private ComboBox            cmbProcess;
+        private ComboBox            cmbMode;
+
+        // ─── State ────────────────────────────────────────────────────────
         private ManualDocument          _document;
         private List<WindowSnapshot>    _snapshots;
         private SourceAnalyzer          _sourceAnalyzer;
         private ManualGenerator         _generator;
         private CancellationTokenSource _cts;
         private string                  _tempDir;
-        private bool                    _generating;
 
-        // ─── Constructor ──────────────────────────────────────────────────────
+        private List<(int Pid, string Name, string Title, IntPtr Hwnd)> _processes
+            = new List<(int, string, string, IntPtr)>();
+
+        // ─── Constructor ──────────────────────────────────────────────────
 
         public ManualEditorPanel()
         {
@@ -69,217 +77,576 @@ namespace AIAssistant
                 else UpdateProgress(done, total);
             };
 
-            _tempDir = Path.Combine(Path.GetTempPath(), "AIAssistant_Manual_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+            _tempDir = Path.Combine(Path.GetTempPath(),
+                "AIAssistant_Manual_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             Directory.CreateDirectory(_tempDir);
 
+            DoubleBuffered = true;
             BuildUI();
             RefreshProcessList();
         }
 
-        // ─── UI Construction ──────────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════
+        //  UI CONSTRUCTION
+        // ═══════════════════════════════════════════════════════════════════
 
         private void BuildUI()
         {
-            BackColor = BG;
-            Padding   = Padding.Empty;
+            BackColor = CLR_BG;
+            Padding = Padding.Empty;
 
             // ── Toolbar ──
-            var toolbar = new FlowLayoutPanel
+            pnlToolbar = new FlowLayoutPanel
             {
-                Dock = DockStyle.Top, Height = 38,
-                BackColor = BG2, Padding = new Padding(6, 5, 6, 5),
+                Dock = DockStyle.Top, Height = 44,
+                BackColor = CLR_TOOLBAR,
+                Padding = new Padding(12, 8, 12, 8),
                 WrapContents = false
             };
 
-            // Mode selector
-            var lblMode = new Label
-            {
-                Text = "Mode:", AutoSize = true, ForeColor = FG,
-                Font = new Font("Segoe UI", 8.5f), Padding = new Padding(0, 5, 2, 0)
-            };
-
-            cmbMode = new ComboBox
-            {
-                Width = 130, DropDownStyle = ComboBoxStyle.DropDownList,
-                BackColor = Color.FromArgb(50, 50, 60), ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 8.5f),
-                Margin = new Padding(0, 2, 12, 0)
-            };
+            // Mode
+            AddLabel(pnlToolbar, "Mode", 4);
+            cmbMode = CreateCombo(145);
             cmbMode.Items.AddRange(new object[] { "📸 Current Screen", "🌐 Full App (Auto-Crawl)" });
             cmbMode.SelectedIndex = 0;
-            cmbMode.DropDown += AutoWidenCombo;
+            pnlToolbar.Controls.Add(cmbMode);
 
-            // Process selector
-            var lblProc = new Label
-            {
-                Text = "Target:", AutoSize = true, ForeColor = FG,
-                Font = new Font("Segoe UI", 8.5f), Padding = new Padding(0, 5, 2, 0)
-            };
+            AddSpacer(pnlToolbar, 8);
 
-            cmbProcess = new ComboBox
-            {
-                Width = 220, DropDownStyle = ComboBoxStyle.DropDownList,
-                BackColor = Color.FromArgb(50, 50, 60), ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 8.5f),
-                Margin = new Padding(0, 2, 4, 0)
-            };
-            cmbProcess.DropDown += AutoWidenCombo;
+            // Target process
+            AddLabel(pnlToolbar, "Target", 4);
+            cmbProcess = CreateCombo(230);
+            pnlToolbar.Controls.Add(cmbProcess);
 
-            btnRefreshProcesses = CreateToolBtn("🔄", BORDER);
-            btnRefreshProcesses.Width = 28;
-            btnRefreshProcesses.ToolTipText("Refresh process list");
-            btnRefreshProcesses.Click += (s, e) => RefreshProcessList();
+            var btnRefresh = CreateIconBtn("🔄", "Refresh", CLR_CARD);
+            btnRefresh.Click += (s, e) => RefreshProcessList();
+            pnlToolbar.Controls.Add(btnRefresh);
 
-            btnCapture  = CreateToolBtn("📸 Capture",   ACCENT);
-            btnGenerate = CreateToolBtn("✨ Generate",   Color.FromArgb(79, 60, 120));
-            btnExport   = CreateToolBtn("📄 Export DOCX", GREEN);
-            btnCancel   = CreateToolBtn("⏹ Cancel",     Color.FromArgb(100, 50, 50));
+            AddSpacer(pnlToolbar, 12);
+
+            // Action buttons
+            var btnCapture  = CreateAccentBtn("📸 Capture",  CLR_ACCENT);
+            var btnGenerate = CreateAccentBtn("✨ Generate", CLR_ACCENT2);
+            var btnExport   = CreateAccentBtn("📄 Export DOCX", Color.FromArgb(60, 100, 160));
+            var btnCancel   = CreateAccentBtn("⏹ Cancel",    CLR_DANGER);
 
             btnCapture.Click  += BtnCapture_Click;
             btnGenerate.Click += BtnGenerate_Click;
             btnExport.Click   += BtnExport_Click;
             btnCancel.Click   += BtnCancel_Click;
 
-            btnGenerate.Enabled = false;
-            btnExport.Enabled   = false;
-            btnCancel.Enabled   = false;
+            btnGenerate.Tag = "btnGenerate"; btnGenerate.Enabled = false;
+            btnExport.Tag   = "btnExport";   btnExport.Enabled   = false;
+            btnCancel.Tag   = "btnCancel";   btnCancel.Enabled   = false;
 
-            toolbar.Controls.AddRange(new Control[]
-                { lblMode, cmbMode, lblProc, cmbProcess, btnRefreshProcesses,
-                  btnCapture, btnGenerate, btnExport, btnCancel });
+            pnlToolbar.Controls.AddRange(new Control[] { btnCapture, btnGenerate, btnExport, btnCancel });
 
-            // ── Progress bar ──
+            // ── Progress ──
             progressBar = new ProgressBar
             {
-                Dock = DockStyle.Top, Height = 4,
-                BackColor = BG, ForeColor = ACCENT,
+                Dock = DockStyle.Top, Height = 3,
+                BackColor = CLR_BG, ForeColor = CLR_ACCENT,
                 Style = ProgressBarStyle.Continuous, Visible = false
             };
 
             // ── Status bar ──
             lblStatus = new Label
             {
-                Dock = DockStyle.Bottom, Height = 22,
-                Text = "WPF App을 실행하고 Target 프로세스를 선택한 후 📸 Capture를 클릭하세요.",
-                BackColor = Color.FromArgb(20, 20, 30), ForeColor = Color.FromArgb(150, 150, 180),
-                Font = new Font("Segoe UI", 8.5f), TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(6, 0, 0, 0)
+                Dock = DockStyle.Bottom, Height = 24,
+                Text = "WPF 앱을 실행 → Target 선택 → 📸 Capture",
+                BackColor = Color.FromArgb(18, 18, 24), ForeColor = CLR_TEXT_DIM,
+                Font = FNT_SMALL, TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(12, 0, 0, 0)
             };
 
-            // ── Main split: left tree 30% / right detail 70% ──
-            var mainSplit = new SplitContainer
+            // ── Card container (scrollable) ──
+            pnlCards = new Panel
             {
-                Dock = DockStyle.Fill, Orientation = Orientation.Vertical,
-                BackColor = BORDER, Panel1MinSize = 160, Panel2MinSize = 300
-            };
-            bool splitSet = false;
-            mainSplit.Layout += (s, e) =>
-            {
-                if (!splitSet && mainSplit.Width > 100)
-                {
-                    mainSplit.SplitterDistance = Math.Max(180, (int)(mainSplit.Width * 0.30));
-                    splitSet = true;
-                }
+                Dock = DockStyle.Fill,
+                AutoScroll = true,
+                BackColor = CLR_BG,
+                Padding = new Padding(0, 8, 0, 8)
             };
 
-            // Left: Document tree
-            treeDoc = new TreeView
-            {
-                Dock = DockStyle.Fill, BackColor = BG2, ForeColor = FG,
-                BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 9f),
-                ShowLines = true, HideSelection = false,
-                ItemHeight = 22
-            };
-            treeDoc.AfterSelect += TreeDoc_AfterSelect;
+            // Welcome message
+            ShowWelcomeCard();
 
-            // Context menu for tree nodes
-            var ctxMenu = new ContextMenuStrip { BackColor = BG2, ForeColor = FG };
-            ctxMenu.Items.Add("✏️ Edit Title",       null, (s, e) => EditSelectedTitle());
-            ctxMenu.Items.Add("🔄 Regenerate",        null, async (s, e) => await RegenerateSelectedAsync());
-            ctxMenu.Items.Add("👁 Include/Exclude",   null, (s, e) => ToggleSelectedInclude());
-            ctxMenu.Items.Add("-");
-            ctxMenu.Items.Add("⬆ Move Up",            null, (s, e) => MoveSelected(-1));
-            ctxMenu.Items.Add("⬇ Move Down",          null, (s, e) => MoveSelected(+1));
-            treeDoc.ContextMenuStrip = ctxMenu;
-
-            mainSplit.Panel1.Controls.Add(treeDoc);
-
-            // Right: top = screenshot, bottom = text
-            var rightSplit = new SplitContainer
-            {
-                Dock = DockStyle.Fill, Orientation = Orientation.Horizontal,
-                BackColor = BORDER, Panel1MinSize = 80, Panel2MinSize = 100
-            };
-            bool rightSplitSet = false;
-            rightSplit.Layout += (s, e) =>
-            {
-                if (!rightSplitSet && rightSplit.Height > 100)
-                {
-                    rightSplit.SplitterDistance = Math.Max(120, (int)(rightSplit.Height * 0.55));
-                    rightSplitSet = true;
-                }
-            };
-
-            picScreenshot = new PictureBox
-            {
-                Dock = DockStyle.Fill, BackColor = Color.FromArgb(20, 20, 28),
-                SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.None
-            };
-
-            txtDetail = new RichTextBox
-            {
-                Dock = DockStyle.Fill, BackColor = BG2, ForeColor = FG,
-                Font = new Font("Segoe UI", 9.5f), ReadOnly = false,
-                BorderStyle = BorderStyle.None, ScrollBars = RichTextBoxScrollBars.Vertical
-            };
-
-            rightSplit.Panel1.Controls.Add(picScreenshot);
-            rightSplit.Panel2.Controls.Add(txtDetail);
-            mainSplit.Panel2.Controls.Add(rightSplit);
-
-            // Assemble
-            Controls.Add(mainSplit);
+            // Assemble (bottom-up order in Controls.Add)
+            Controls.Add(pnlCards);
             Controls.Add(progressBar);
-            Controls.Add(toolbar);
+            Controls.Add(pnlToolbar);
             Controls.Add(lblStatus);
         }
 
-        // ─── Process list ─────────────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════
+        //  STEP CARDS — the core Trupeer/StepHow-style UI elements
+        // ═══════════════════════════════════════════════════════════════════
 
-        private List<(int Pid, string Name, string Title, IntPtr Hwnd)> _processes
-            = new List<(int, string, string, IntPtr)>();
-
-        private void RefreshProcessList()
+        /// <summary>Renders all blocks as step cards in the scrollable panel.</summary>
+        private void RenderCards()
         {
-            _processes = UiInspector.GetWpfProcesses();
-            cmbProcess.Items.Clear();
-            foreach (var p in _processes)
-                cmbProcess.Items.Add($"[{p.Pid}] {p.Name} — {TruncateTitle(p.Title)}");
+            pnlCards.SuspendLayout();
+            pnlCards.Controls.Clear();
 
-            if (cmbProcess.Items.Count > 0)
-                cmbProcess.SelectedIndex = 0;
-        }
-
-        private static string TruncateTitle(string t, int max = 40)
-            => t?.Length > max ? t.Substring(0, max) + "…" : (t ?? "");
-
-        // ─── Capture ──────────────────────────────────────────────────────────
-
-        private async void BtnCapture_Click(object sender, EventArgs e)
-        {
-            if (cmbProcess.SelectedIndex < 0 || _processes.Count == 0)
+            if (_document == null || _document.Blocks.Count == 0)
             {
-                lblStatus.Text = "⚠️ 먼저 대상 프로세스를 선택하세요.";
+                ShowWelcomeCard();
+                pnlCards.ResumeLayout();
                 return;
             }
 
-            SetBusy(true, "캡처 중...");
+            int stepNum = 0;
+            int yPos = 12;
+            int cardWidth = Math.Max(400, pnlCards.ClientSize.Width - 48);
 
+            foreach (var block in _document.Blocks.Where(b => b.IsIncluded).OrderBy(b => b.Order))
+            {
+                Panel card;
+                if (block.Type == ManualBlockType.Heading)
+                    card = CreateHeadingCard(block, cardWidth);
+                else if (block.Type == ManualBlockType.Screenshot)
+                    card = CreateScreenshotCard(block, cardWidth);
+                else if (block.Type == ManualBlockType.ControlItem)
+                {
+                    stepNum++;
+                    card = CreateControlCard(block, stepNum, cardWidth);
+                }
+                else
+                    card = CreateGenericCard(block, cardWidth);
+
+                card.Location = new Point(20, yPos);
+                card.Width = cardWidth;
+                pnlCards.Controls.Add(card);
+                yPos += card.Height + 10;
+            }
+
+            // + Add Step card
+            var addBtn = CreateAddStepCard(cardWidth);
+            addBtn.Location = new Point(20, yPos);
+            pnlCards.Controls.Add(addBtn);
+
+            pnlCards.ResumeLayout();
+        }
+
+        // ── Heading Card ──────────────────────────────────────────────────
+
+        private Panel CreateHeadingCard(ManualBlock block, int w)
+        {
+            var card = new Panel
+            {
+                Width = w, Height = 52, BackColor = CLR_CARD,
+                Tag = block, Cursor = Cursors.Default
+            };
+            card.Paint += (s, e) => PaintCardBorder(e.Graphics, card, CLR_ACCENT, 2);
+
+            // Accent left bar
+            var accent = new Panel
+            {
+                Location = new Point(0, 0), Width = 4, Height = card.Height,
+                BackColor = CLR_ACCENT
+            };
+            card.Controls.Add(accent);
+
+            // Title (editable)
+            var txtTitle = new TextBox
+            {
+                Text = block.Title, Font = FNT_TITLE, ForeColor = CLR_TEXT,
+                BackColor = CLR_CARD, BorderStyle = BorderStyle.None,
+                Location = new Point(16, 14), Width = w - 100
+            };
+            txtTitle.TextChanged += (s, e) => block.Title = txtTitle.Text;
+            card.Controls.Add(txtTitle);
+
+            // Delete button
+            var btnDel = CreateSmallBtn("✕", CLR_DANGER);
+            btnDel.Location = new Point(w - 36, 14);
+            btnDel.Click += (s, e) => RemoveBlock(block);
+            card.Controls.Add(btnDel);
+
+            return card;
+        }
+
+        // ── Screenshot Card (with dynamic callout controls) ──────────────
+
+        private Panel CreateScreenshotCard(ManualBlock block, int w)
+        {
+            // Find associated snapshot
+            var snapshot = _snapshots?.FirstOrDefault(sn =>
+                sn.WindowTitle == block.WindowName &&
+                (sn.TabContext ?? "") == (block.TabContext ?? ""));
+
+            int imgHeight = 300;
+            int calloutBarHeight = (block.Callouts?.Count > 0) ? 32 + Math.Min(block.Callouts.Count, 6) * 24 : 60;
+            int totalHeight = imgHeight + calloutBarHeight + 50;
+
+            var card = new Panel
+            {
+                Width = w, Height = totalHeight, BackColor = CLR_CARD,
+                Tag = block, Cursor = Cursors.Default
+            };
+            card.Paint += (s, e) => PaintCardBorder(e.Graphics, card, CLR_CARD_BORDER, 1);
+
+            // ── Top bar: title + callout toggle ──
+            var txtTitle = new TextBox
+            {
+                Text = block.Title, Font = FNT_BODY, ForeColor = CLR_TEXT_DIM,
+                BackColor = CLR_CARD, BorderStyle = BorderStyle.None,
+                Location = new Point(12, 8), Width = w - 180
+            };
+            txtTitle.TextChanged += (s, e) => block.Title = txtTitle.Text;
+            card.Controls.Add(txtTitle);
+
+            var chkCallouts = new CheckBox
+            {
+                Text = "Show Callouts", Checked = block.ShowCallouts,
+                ForeColor = CLR_TEXT_DIM, Font = FNT_SMALL,
+                AutoSize = true, Location = new Point(w - 160, 8),
+                BackColor = CLR_CARD, FlatStyle = FlatStyle.Flat
+            };
+            chkCallouts.CheckedChanged += (s, e) =>
+            {
+                block.ShowCallouts = chkCallouts.Checked;
+                RefreshScreenshotImage(card, block, snapshot);
+            };
+            card.Controls.Add(chkCallouts);
+
+            // ── Screenshot image ──
+            var pic = new PictureBox
+            {
+                Location = new Point(12, 32), Width = w - 24, Height = imgHeight,
+                SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(18, 18, 26),
+                BorderStyle = BorderStyle.None, Tag = "pic"
+            };
+            // Render annotated bitmap
+            if (snapshot != null && !string.IsNullOrEmpty(snapshot.ScreenshotPath))
+            {
+                var bmp = ScreenCaptureEngine.RenderAnnotatedBitmap(
+                    snapshot.ScreenshotPath, block.ShowCallouts ? block.Callouts : null,
+                    snapshot.WindowRect, block.ShowCallouts);
+                pic.Image = bmp;
+            }
+            card.Controls.Add(pic);
+
+            // ── Callout list with insert/delete ──
+            int cy = 32 + imgHeight + 8;
+
+            var lblCallouts = new Label
+            {
+                Text = $"Callouts ({block.Callouts?.Count ?? 0})", Font = FNT_SMALL,
+                ForeColor = CLR_ACCENT, AutoSize = true,
+                Location = new Point(12, cy), BackColor = CLR_CARD
+            };
+            card.Controls.Add(lblCallouts);
+
+            var btnAddCallout = CreateSmallBtn("+ Add", CLR_ACCENT);
+            btnAddCallout.Location = new Point(160, cy - 2);
+            btnAddCallout.Width = 55;
+            btnAddCallout.Click += (s, e) =>
+            {
+                if (snapshot == null) return;
+                // Add next unassigned important element
+                var usedIds = new HashSet<string>(block.Callouts.Select(c => c.ElementId));
+                var nextEl = snapshot.Elements
+                    .Where(el => el.ImportanceScore >= 3 && !usedIds.Contains(el.UniqueId) && !el.IsOffscreen)
+                    .OrderByDescending(el => el.ImportanceScore)
+                    .FirstOrDefault();
+
+                if (nextEl != null)
+                {
+                    int nextNum = block.Callouts.Count > 0 ? block.Callouts.Max(c => c.Number) + 1 : 1;
+                    block.Callouts.Add(new CalloutItem
+                    {
+                        Number    = nextNum,
+                        ElementId = nextEl.UniqueId,
+                        Label     = string.IsNullOrEmpty(nextEl.Name) ? nextEl.ControlType : nextEl.Name,
+                        Rect      = nextEl.BoundingRectangle
+                    });
+                    nextEl.CalloutNumber = nextNum;
+                    RenderCards();
+                }
+                else
+                {
+                    lblStatus.Text = "ℹ️ 추가할 수 있는 UI 요소가 없습니다.";
+                }
+            };
+            card.Controls.Add(btnAddCallout);
+
+            var btnClearCallouts = CreateSmallBtn("Clear All", Color.FromArgb(100, 60, 60));
+            btnClearCallouts.Location = new Point(220, cy - 2);
+            btnClearCallouts.Width = 65;
+            btnClearCallouts.Click += (s, e) =>
+            {
+                block.Callouts.Clear();
+                RenderCards();
+            };
+            card.Controls.Add(btnClearCallouts);
+
+            // Individual callout items
+            if (block.Callouts != null)
+            {
+                int ciy = cy + 24;
+                foreach (var callout in block.Callouts.ToList())
+                {
+                    var lbl = new Label
+                    {
+                        Text = $"  {GetCircle(callout.Number)}  {callout.Label}",
+                        Font = FNT_SMALL, ForeColor = CLR_TEXT, AutoSize = false,
+                        Location = new Point(16, ciy), Width = w - 80, Height = 20,
+                        BackColor = CLR_CARD
+                    };
+                    card.Controls.Add(lbl);
+
+                    var btnRemove = CreateSmallBtn("✕", CLR_DANGER);
+                    btnRemove.Location = new Point(w - 52, ciy);
+                    btnRemove.Width = 24; btnRemove.Height = 20;
+                    var capturedCallout = callout;
+                    btnRemove.Click += (s, e) =>
+                    {
+                        block.Callouts.Remove(capturedCallout);
+                        RenumberCallouts(block.Callouts);
+                        RenderCards();
+                    };
+                    card.Controls.Add(btnRemove);
+                    ciy += 24;
+                }
+            }
+
+            return card;
+        }
+
+        // ── Control Item Card (the core "step" card) ─────────────────────
+
+        private Panel CreateControlCard(ManualBlock block, int stepNum, int w)
+        {
+            int h = string.IsNullOrEmpty(block.Content) ? 100 : 
+                    Math.Min(220, 80 + (block.Content.Split('\n').Length * 18));
+            if (block.Steps?.Count > 0) h += block.Steps.Count * 18 + 20;
+
+            var card = new Panel
+            {
+                Width = w, Height = h, BackColor = CLR_CARD,
+                Tag = block, Cursor = Cursors.Default
+            };
+            card.Paint += (s, e) => PaintCardBorder(e.Graphics, card, CLR_CARD_BORDER, 1);
+            card.MouseEnter += (s, e) => card.BackColor = CLR_CARD_HOVER;
+            card.MouseLeave += (s, e) => card.BackColor = CLR_CARD;
+
+            // ── Step number circle ──
+            var pnlStep = new Panel
+            {
+                Location = new Point(12, 12), Width = 36, Height = 36,
+                BackColor = Color.Transparent
+            };
+            pnlStep.Paint += (s, e) =>
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var brush = new SolidBrush(CLR_ACCENT))
+                    e.Graphics.FillEllipse(brush, 0, 0, 34, 34);
+                using (var font = new Font("Segoe UI", 12f, FontStyle.Bold))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    var sf = new StringFormat
+                    { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    e.Graphics.DrawString(stepNum.ToString(), font, brush, new RectangleF(0, 0, 34, 34), sf);
+                }
+            };
+            card.Controls.Add(pnlStep);
+
+            // ── Title (editable) ──
+            var txtTitle = new TextBox
+            {
+                Text = block.Title, Font = FNT_TITLE, ForeColor = CLR_TEXT,
+                BackColor = CLR_CARD, BorderStyle = BorderStyle.None,
+                Location = new Point(56, 12), Width = w - 200
+            };
+            txtTitle.TextChanged += (s, e) => block.Title = txtTitle.Text;
+            txtTitle.Enter += (s, e) => txtTitle.BackColor = CLR_INPUT;
+            txtTitle.Leave += (s, e) => { txtTitle.BackColor = CLR_CARD; block.Title = txtTitle.Text; };
+            card.Controls.Add(txtTitle);
+
+            // Callout badge
+            if (block.CalloutNumber.HasValue)
+            {
+                var badge = new Label
+                {
+                    Text = GetCircle(block.CalloutNumber.Value),
+                    Font = FNT_BODY, ForeColor = CLR_ACCENT, AutoSize = true,
+                    Location = new Point(56, 36), BackColor = CLR_CARD
+                };
+                card.Controls.Add(badge);
+            }
+
+            // ── Action buttons (top-right) ──
+            int bx = w - 140;
+            var btnRegen = CreateSmallBtn("🔄", CLR_ACCENT);
+            btnRegen.Location = new Point(bx, 12);
+            btnRegen.Click += async (s, e) => await RegenerateBlockAsync(block);
+            card.Controls.Add(btnRegen);
+
+            var btnUp = CreateSmallBtn("⬆", CLR_CARD_BORDER);
+            btnUp.Location = new Point(bx + 30, 12);
+            btnUp.Click += (s, e) => MoveBlock(block, -1);
+            card.Controls.Add(btnUp);
+
+            var btnDown = CreateSmallBtn("⬇", CLR_CARD_BORDER);
+            btnDown.Location = new Point(bx + 56, 12);
+            btnDown.Click += (s, e) => MoveBlock(block, +1);
+            card.Controls.Add(btnDown);
+
+            var btnDel = CreateSmallBtn("✕", CLR_DANGER);
+            btnDel.Location = new Point(bx + 82, 12);
+            btnDel.Click += (s, e) => RemoveBlock(block);
+            card.Controls.Add(btnDel);
+
+            // ── Description (editable multi-line) ──
+            int textY = block.CalloutNumber.HasValue ? 56 : 42;
+            var txtDesc = new TextBox
+            {
+                Text = block.Content ?? "", Font = FNT_BODY, ForeColor = CLR_TEXT_DIM,
+                BackColor = CLR_CARD, BorderStyle = BorderStyle.None,
+                Location = new Point(56, textY), Width = w - 80,
+                Height = h - textY - 8 - (block.Steps?.Count > 0 ? block.Steps.Count * 18 + 10 : 0),
+                Multiline = true, ScrollBars = ScrollBars.None, WordWrap = true
+            };
+            txtDesc.TextChanged += (s, e) => block.Content = txtDesc.Text;
+            txtDesc.Enter += (s, e) => txtDesc.BackColor = CLR_INPUT;
+            txtDesc.Leave += (s, e) => txtDesc.BackColor = CLR_CARD;
+            card.Controls.Add(txtDesc);
+
+            // ── Steps (numbered list) ──
+            if (block.Steps?.Count > 0)
+            {
+                int sy = h - block.Steps.Count * 18 - 8;
+                for (int i = 0; i < block.Steps.Count; i++)
+                {
+                    var lbl = new Label
+                    {
+                        Text = $"  {i + 1}. {block.Steps[i]}", Font = FNT_SMALL,
+                        ForeColor = CLR_TEXT, AutoSize = false,
+                        Location = new Point(56, sy + i * 18),
+                        Width = w - 80, Height = 18, BackColor = CLR_CARD
+                    };
+                    card.Controls.Add(lbl);
+                }
+            }
+
+            // Confidence indicator
+            if (block.Confidence > 0 && block.Confidence < 0.6)
+            {
+                var warn = new Label
+                {
+                    Text = $"⚠️ 신뢰도 낮음 ({block.Confidence:P0})", Font = FNT_SMALL,
+                    ForeColor = Color.FromArgb(220, 160, 50), AutoSize = true,
+                    Location = new Point(56, h - 20), BackColor = CLR_CARD
+                };
+                card.Controls.Add(warn);
+            }
+
+            return card;
+        }
+
+        // ── Generic Card ─────────────────────────────────────────────────
+
+        private Panel CreateGenericCard(ManualBlock block, int w)
+        {
+            var card = new Panel
+            {
+                Width = w, Height = 60, BackColor = CLR_CARD, Tag = block
+            };
+            card.Paint += (s, e) => PaintCardBorder(e.Graphics, card, CLR_CARD_BORDER, 1);
+
+            var lbl = new Label
+            {
+                Text = $"  {block.Title}", Font = FNT_BODY,
+                ForeColor = CLR_TEXT_DIM, AutoSize = true,
+                Location = new Point(12, 18), BackColor = CLR_CARD
+            };
+            card.Controls.Add(lbl);
+            return card;
+        }
+
+        // ── Add Step Card ────────────────────────────────────────────────
+
+        private Panel CreateAddStepCard(int w)
+        {
+            var card = new Panel
+            {
+                Width = w, Height = 48, BackColor = Color.Transparent,
+                Cursor = Cursors.Hand
+            };
+            card.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(CLR_CARD_BORDER, 1.5f) { DashStyle = DashStyle.Dash })
+                    e.Graphics.DrawRectangle(pen, 1, 1, card.Width - 3, card.Height - 3);
+
+                using (var brush = new SolidBrush(CLR_TEXT_DIM))
+                using (var font = new Font("Segoe UI", 10f))
+                {
+                    var sf = new StringFormat
+                    { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    e.Graphics.DrawString("＋ Add Step", font, brush,
+                        new RectangleF(0, 0, card.Width, card.Height), sf);
+                }
+            };
+            card.Click += (s, e) => AddManualStep();
+            return card;
+        }
+
+        // ── Welcome Card ─────────────────────────────────────────────────
+
+        private void ShowWelcomeCard()
+        {
+            pnlCards.Controls.Clear();
+            int w = Math.Max(400, pnlCards.ClientSize.Width - 48);
+
+            var card = new Panel
+            {
+                Width = w, Height = 200, BackColor = CLR_CARD,
+                Location = new Point(20, 40)
+            };
+            card.Paint += (s, e) => PaintCardBorder(e.Graphics, card, CLR_ACCENT, 1);
+
+            string[] lines =
+            {
+                "📖  WPF Auto Manual Generator",
+                "",
+                "1.  대상 WPF Application을 실행합니다",
+                "2.  Target 드롭다운에서 프로세스를 선택합니다",
+                "3.  Mode를 선택합니다 (현재 화면 / 전체 앱)",
+                "4.  📸 Capture를 클릭하면 UI 수집 + 스크린샷이 진행됩니다",
+                "5.  ✨ Generate를 클릭하면 LLM이 매뉴얼을 작성합니다",
+                "6.  각 스텝 카드에서 내용을 편집합니다",
+                "7.  📄 Export DOCX로 Word 파일을 생성합니다"
+            };
+            int y = 20;
+            foreach (var line in lines)
+            {
+                var lbl = new Label
+                {
+                    Text = line,
+                    Font = line.StartsWith("📖") ? FNT_TITLE : FNT_BODY,
+                    ForeColor = line.StartsWith("📖") ? CLR_ACCENT : CLR_TEXT,
+                    AutoSize = true, Location = new Point(24, y), BackColor = CLR_CARD
+                };
+                card.Controls.Add(lbl);
+                y += line.StartsWith("📖") ? 28 : 18;
+            }
+            pnlCards.Controls.Add(card);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  ACTIONS
+        // ═══════════════════════════════════════════════════════════════════
+
+        // ── Capture ──
+        private async void BtnCapture_Click(object sender, EventArgs e)
+        {
+            if (cmbProcess.SelectedIndex < 0 || _processes.Count == 0)
+            { lblStatus.Text = "⚠️ 먼저 대상 프로세스를 선택하세요."; return; }
+
+            SetBusy(true, "🔍 UI 수집 중...");
             var proc = _processes[cmbProcess.SelectedIndex];
             var mode = cmbMode.SelectedIndex == 1 ? CaptureMode.FullApp : CaptureMode.CurrentScreen;
-
-            _snapshots = null;
-            _document  = null;
 
             try
             {
@@ -290,100 +657,102 @@ namespace AIAssistant
                         var snap = UiInspector.CaptureCurrentScreen(proc.Hwnd, _tempDir);
                         return snap == null ? null : new List<WindowSnapshot> { snap };
                     }
-                    else
-                    {
-                        return UiInspector.CaptureFullApp(proc.Hwnd, _tempDir,
-                            msg => BeginInvoke((Action)(() => lblStatus.Text = msg)));
-                    }
+                    return UiInspector.CaptureFullApp(proc.Hwnd, _tempDir,
+                        msg => BeginInvoke((Action)(() => lblStatus.Text = msg)));
                 });
 
                 if (_snapshots == null || _snapshots.Count == 0)
-                {
-                    lblStatus.Text = "⚠️ UI 요소를 수집하지 못했습니다. 대상 앱이 실행 중인지 확인하세요.";
-                    SetBusy(false, "");
-                    return;
-                }
+                { lblStatus.Text = "⚠️ UI 요소를 수집하지 못했습니다."; SetBusy(false, ""); return; }
 
-                // Build source analyzer for VS solution
+                // Source analysis
                 string solDir = GetSolutionDirectory();
                 _sourceAnalyzer = new SourceAnalyzer(solDir);
                 if (!string.IsNullOrEmpty(solDir))
                 {
-                    lblStatus.Text = "소스 분석 중...";
+                    lblStatus.Text = "📁 소스 분석 중...";
                     await Task.Run(() => _sourceAnalyzer.BuildIndex());
                 }
 
-                // Map UI to source and build document
+                // Build document
                 var mapper = new UiSourceMapper(_sourceAnalyzer);
-                _document  = mapper.BuildDocument(_snapshots, solDir, proc.Name);
+                _document = mapper.BuildDocument(_snapshots, solDir, proc.Name);
 
-                // Populate tree
-                PopulateTree(_document);
+                // Propagate raw screenshot paths to blocks
+                foreach (var block in _document.Blocks.Where(b => b.Type == ManualBlockType.Screenshot))
+                {
+                    var snap = _snapshots.FirstOrDefault(sn =>
+                        sn.WindowTitle == block.WindowName &&
+                        (sn.TabContext ?? "") == (block.TabContext ?? ""));
+                    if (snap != null)
+                        block.RawScreenshotPath = snap.ScreenshotPath;
+                }
 
-                lblStatus.Text = $"✅ 캡처 완료. {_snapshots.Count}개 화면, " +
-                                 $"{_document.Elements.Count}개 UI 요소 수집됨. " +
-                                 $"이제 ✨ Generate를 클릭하여 매뉴얼을 생성하세요.";
-
-                btnGenerate.Enabled = true;
-                btnExport.Enabled   = false;
+                RenderCards();
+                SetBusy(false, $"✅ {_snapshots.Count}개 화면, {_document.Elements.Count}개 UI 요소. ✨ Generate를 클릭하세요.");
+                FindBtn("btnGenerate").Enabled = true;
             }
             catch (Exception ex)
             {
                 lblStatus.Text = $"⚠️ 캡처 오류: {ex.Message}";
-            }
-            finally
-            {
                 SetBusy(false, "");
             }
         }
 
-        // ─── Generate ─────────────────────────────────────────────────────────
-
+        // ── Generate ──
         private async void BtnGenerate_Click(object sender, EventArgs e)
         {
-            if (_document == null) { lblStatus.Text = "먼저 캡처를 수행하세요."; return; }
-
+            if (_document == null) return;
             _cts?.Dispose();
             _cts = new CancellationTokenSource();
 
-            SetBusy(true, "LLM 매뉴얼 생성 중...");
-            btnCancel.Enabled = true;
+            SetBusy(true, "✨ LLM 매뉴얼 생성 중...");
+            FindBtn("btnCancel").Enabled = true;
 
             try
             {
                 await _generator.GenerateAllAsync(_document, _cts.Token);
-
-                // Refresh tree (content updated)
-                PopulateTree(_document);
-
-                lblStatus.Text = $"✅ 매뉴얼 생성 완료. 📄 Export DOCX를 클릭하여 Word 파일로 저장하세요.";
-                btnExport.Enabled = true;
+                RenderCards();
+                SetBusy(false, "✅ 매뉴얼 생성 완료. 각 카드에서 내용을 확인/편집 후 📄 Export DOCX를 클릭하세요.");
+                FindBtn("btnExport").Enabled = true;
             }
             catch (OperationCanceledException)
-            {
-                lblStatus.Text = "⏹ 생성이 취소됐습니다.";
-            }
+            { lblStatus.Text = "⏹ 생성이 취소됐습니다."; }
             catch (Exception ex)
-            {
-                lblStatus.Text = $"⚠️ 생성 오류: {ex.Message}";
-            }
+            { lblStatus.Text = $"⚠️ 오류: {ex.Message}"; }
             finally
             {
                 SetBusy(false, "");
-                btnCancel.Enabled = false;
+                FindBtn("btnCancel").Enabled = false;
             }
         }
 
-        // ─── Export DOCX ──────────────────────────────────────────────────────
-
+        // ── Export ──
         private void BtnExport_Click(object sender, EventArgs e)
         {
             if (_document == null) return;
 
+            // Before export, re-annotate screenshots with current callout state
+            foreach (var block in _document.Blocks.Where(b => b.Type == ManualBlockType.Screenshot))
+            {
+                var snap = _snapshots?.FirstOrDefault(sn =>
+                    sn.WindowTitle == block.WindowName &&
+                    (sn.TabContext ?? "") == (block.TabContext ?? ""));
+
+                if (snap != null && !string.IsNullOrEmpty(snap.ScreenshotPath))
+                {
+                    string tag = $"export_{block.Id}";
+                    string annotated = ScreenCaptureEngine.AnnotateScreenshot(
+                        snap.ScreenshotPath,
+                        block.ShowCallouts ? block.Callouts : null,
+                        snap.WindowRect, _tempDir, tag);
+                    block.ScreenshotPath = annotated;
+                }
+            }
+
             using (var dlg = new SaveFileDialog
             {
-                Title    = "매뉴얼 저장",
-                Filter   = "Word Document (*.docx)|*.docx",
+                Title = "매뉴얼 저장",
+                Filter = "Word Document (*.docx)|*.docx",
                 FileName = $"{_document.ApplicationName}_Manual_{DateTime.Now:yyyyMMdd}.docx"
             })
             {
@@ -391,16 +760,13 @@ namespace AIAssistant
                 try
                 {
                     ManualExporter.ExportDocx(_document, dlg.FileName);
-                    lblStatus.Text = $"✅ DOCX 저장 완료: {dlg.FileName}";
-
-                    // Open in Word if available
+                    lblStatus.Text = $"✅ DOCX 저장 완료: {Path.GetFileName(dlg.FileName)}";
                     if (MessageBox.Show("Word 파일을 열겠습니까?", "완료",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                         System.Diagnostics.Process.Start(dlg.FileName);
                 }
                 catch (Exception ex)
                 {
-                    lblStatus.Text = $"⚠️ DOCX 저장 실패: {ex.Message}";
                     MessageBox.Show($"저장 오류:\n{ex.Message}", "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
@@ -410,236 +776,109 @@ namespace AIAssistant
         private void BtnCancel_Click(object sender, EventArgs e)
         {
             _cts?.Cancel();
-            btnCancel.Enabled = false;
+            FindBtn("btnCancel").Enabled = false;
             lblStatus.Text = "⏹ 취소 중...";
         }
 
-        // ─── Tree management ──────────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════
+        //  BLOCK MANIPULATION
+        // ═══════════════════════════════════════════════════════════════════
 
-        private void PopulateTree(ManualDocument doc)
-        {
-            treeDoc.BeginUpdate();
-            treeDoc.Nodes.Clear();
-
-            TreeNode currentSection = null;
-
-            foreach (var block in doc.Blocks.OrderBy(b => b.Order))
-            {
-                string prefix = block.IsIncluded ? "" : "🚫 ";
-                string icon   = GetBlockIcon(block.Type);
-                string label  = $"{icon}{prefix}{block.Title}";
-
-                var node = new TreeNode(label) { Tag = block };
-                StyleNode(node, block);
-
-                if (block.Type == ManualBlockType.Heading)
-                {
-                    treeDoc.Nodes.Add(node);
-                    currentSection = node;
-                }
-                else
-                {
-                    if (currentSection != null)
-                        currentSection.Nodes.Add(node);
-                    else
-                        treeDoc.Nodes.Add(node);
-                }
-            }
-
-            treeDoc.ExpandAll();
-            treeDoc.EndUpdate();
-        }
-
-        private void StyleNode(TreeNode node, ManualBlock block)
-        {
-            if (!block.IsIncluded)
-            {
-                node.ForeColor = Color.FromArgb(80, 80, 100);
-                return;
-            }
-            switch (block.Type)
-            {
-                case ManualBlockType.Heading:
-                    node.ForeColor = Color.FromArgb(86, 156, 214); break;
-                case ManualBlockType.Screenshot:
-                    node.ForeColor = Color.FromArgb(150, 200, 150); break;
-                case ManualBlockType.ControlItem:
-                    node.ForeColor = FG; break;
-                case ManualBlockType.Warning:
-                    node.ForeColor = Color.FromArgb(220, 100, 50); break;
-                default:
-                    node.ForeColor = FG; break;
-            }
-        }
-
-        private static string GetBlockIcon(ManualBlockType t)
-        {
-            switch (t)
-            {
-                case ManualBlockType.Heading:     return "📑 ";
-                case ManualBlockType.Screenshot:  return "🖼 ";
-                case ManualBlockType.ControlItem: return "🔘 ";
-                case ManualBlockType.Procedure:   return "📋 ";
-                case ManualBlockType.Warning:     return "⚠️ ";
-                case ManualBlockType.Table:       return "📊 ";
-                default:                          return "📝 ";
-            }
-        }
-
-        private void TreeDoc_AfterSelect(object sender, TreeViewEventArgs e)
-        {
-            var block = e.Node?.Tag as ManualBlock;
-            if (block == null) { picScreenshot.Image = null; txtDetail.Clear(); return; }
-
-            // Show screenshot
-            if (block.Type == ManualBlockType.Screenshot &&
-                !string.IsNullOrEmpty(block.ScreenshotPath) &&
-                File.Exists(block.ScreenshotPath))
-            {
-                try
-                {
-                    // Dispose old image
-                    var old = picScreenshot.Image;
-                    picScreenshot.Image = Image.FromFile(block.ScreenshotPath);
-                    old?.Dispose();
-                }
-                catch { }
-            }
-            else if (block.Type == ManualBlockType.ControlItem)
-            {
-                // Find and show the screenshot for the same window/tab section
-                var screenshotBlock = _document?.Blocks
-                    .Where(b => b.Type == ManualBlockType.Screenshot &&
-                                b.WindowName == block.WindowName &&
-                                b.TabContext == block.TabContext)
-                    .FirstOrDefault();
-
-                if (screenshotBlock != null &&
-                    !string.IsNullOrEmpty(screenshotBlock.ScreenshotPath) &&
-                    File.Exists(screenshotBlock.ScreenshotPath))
-                {
-                    try
-                    {
-                        var old = picScreenshot.Image;
-                        picScreenshot.Image = Image.FromFile(screenshotBlock.ScreenshotPath);
-                        old?.Dispose();
-                    }
-                    catch { }
-                }
-            }
-            else
-            {
-                picScreenshot.Image = null;
-            }
-
-            // Show detail text
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"[{block.Type}] {block.Title}");
-            if (block.CalloutNumber.HasValue)
-                sb.AppendLine($"Callout: #{block.CalloutNumber}");
-            if (!string.IsNullOrEmpty(block.Content))
-            {
-                sb.AppendLine();
-                sb.AppendLine(block.Content);
-            }
-            if (block.Steps?.Count > 0)
-            {
-                sb.AppendLine();
-                for (int i = 0; i < block.Steps.Count; i++)
-                    sb.AppendLine($"  {i+1}. {block.Steps[i]}");
-            }
-            if (block.SourceEvidence?.Count > 0)
-            {
-                sb.AppendLine();
-                sb.AppendLine($"Source: {string.Join(", ", block.SourceEvidence)}");
-            }
-            if (block.Confidence > 0 && block.Confidence < 0.6)
-                sb.AppendLine($"\n⚠️ 신뢰도 낮음 ({block.Confidence:P0}) — 검토 필요");
-
-            txtDetail.Text = sb.ToString();
-
-            // Allow editing description
-            txtDetail.ReadOnly = false;
-            txtDetail.Tag      = block;
-            txtDetail.TextChanged -= TxtDetail_TextChanged;
-            txtDetail.TextChanged += TxtDetail_TextChanged;
-        }
-
-        private void TxtDetail_TextChanged(object sender, EventArgs e)
-        {
-            // Save edits back to block.Content on change
-            if (txtDetail.Tag is ManualBlock block)
-                block.Content = txtDetail.Text;
-        }
-
-        // ─── Tree node actions ────────────────────────────────────────────────
-
-        private void EditSelectedTitle()
-        {
-            if (treeDoc.SelectedNode?.Tag is ManualBlock block)
-                treeDoc.SelectedNode.BeginEdit();
-        }
-
-        private void ToggleSelectedInclude()
-        {
-            if (treeDoc.SelectedNode?.Tag is ManualBlock block)
-            {
-                block.IsIncluded = !block.IsIncluded;
-                StyleNode(treeDoc.SelectedNode, block);
-                treeDoc.SelectedNode.Text = GetBlockIcon(block.Type) +
-                    (block.IsIncluded ? "" : "🚫 ") + block.Title;
-            }
-        }
-
-        private async Task RegenerateSelectedAsync()
-        {
-            if (treeDoc.SelectedNode?.Tag is ManualBlock block)
-            {
-                var el    = _document?.Elements.FirstOrDefault(e => e.UniqueId == block.ElementUniqueId);
-                var trace = _document?.Traces.FirstOrDefault(t => t.ElementUniqueId == block.ElementUniqueId);
-
-                lblStatus.Text = $"🔄 Regenerating: {block.Title}...";
-                await _generator.RegenerateBlockAsync(block, el, trace);
-
-                // Refresh tree selection
-                TreeDoc_AfterSelect(this, new TreeViewEventArgs(treeDoc.SelectedNode));
-                lblStatus.Text = $"✅ Regenerated: {block.Title}";
-            }
-        }
-
-        private void MoveSelected(int delta)
+        private void RemoveBlock(ManualBlock block)
         {
             if (_document == null) return;
-            var block = treeDoc.SelectedNode?.Tag as ManualBlock;
-            if (block == null) return;
-            int idx = _document.Blocks.IndexOf(block);
-            int newIdx = idx + delta;
-            if (newIdx < 0 || newIdx >= _document.Blocks.Count) return;
-
-            _document.Blocks.RemoveAt(idx);
-            _document.Blocks.Insert(newIdx, block);
-
-            // Reassign order
-            for (int i = 0; i < _document.Blocks.Count; i++)
-                _document.Blocks[i].Order = i;
-
-            PopulateTree(_document);
+            block.IsIncluded = false;
+            RenderCards();
+            lblStatus.Text = $"🗑 '{block.Title}' 제거됨 (Export에서 제외)";
         }
 
-        // ─── Helpers ──────────────────────────────────────────────────────────
-
-        private void SetBusy(bool busy, string status)
+        private void MoveBlock(ManualBlock block, int delta)
         {
-            _generating             = busy;
-            btnCapture.Enabled      = !busy;
-            btnGenerate.Enabled     = !busy && _document != null;
-            btnExport.Enabled       = !busy && _document != null &&
-                                      _document.Blocks.Any(b => !string.IsNullOrEmpty(b.Content));
-            progressBar.Visible     = busy;
-            progressBar.Style       = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
+            if (_document == null) return;
+            var visible = _document.Blocks.Where(b => b.IsIncluded).OrderBy(b => b.Order).ToList();
+            int idx = visible.IndexOf(block);
+            int newIdx = idx + delta;
+            if (newIdx < 0 || newIdx >= visible.Count) return;
 
-            if (!string.IsNullOrEmpty(status))
-                lblStatus.Text = status;
+            // Swap orders
+            int tmpOrder = block.Order;
+            block.Order = visible[newIdx].Order;
+            visible[newIdx].Order = tmpOrder;
+
+            RenderCards();
+        }
+
+        private async Task RegenerateBlockAsync(ManualBlock block)
+        {
+            if (_document == null) return;
+            var el    = _document.Elements.FirstOrDefault(e => e.UniqueId == block.ElementUniqueId);
+            var trace = _document.Traces.FirstOrDefault(t => t.ElementUniqueId == block.ElementUniqueId);
+
+            lblStatus.Text = $"🔄 Regenerating: {block.Title}...";
+            await _generator.RegenerateBlockAsync(block, el, trace);
+            RenderCards();
+            lblStatus.Text = $"✅ Regenerated: {block.Title}";
+        }
+
+        private void AddManualStep()
+        {
+            if (_document == null) return;
+            int maxOrder = _document.Blocks.Max(b => b.Order);
+
+            _document.Blocks.Add(new ManualBlock
+            {
+                Type    = ManualBlockType.ControlItem,
+                Title   = "New Step",
+                Content = "(여기에 설명을 입력하세요)",
+                Order   = maxOrder + 1,
+                IsIncluded = true,
+                Confidence = 1.0
+            });
+            RenderCards();
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  DYNAMIC CALLOUT RENDERING
+        // ═══════════════════════════════════════════════════════════════════
+
+        private void RefreshScreenshotImage(Panel card, ManualBlock block, WindowSnapshot snapshot)
+        {
+            if (snapshot == null) return;
+            var pic = FindControlByTag<PictureBox>(card, "pic");
+            if (pic == null) return;
+
+            var old = pic.Image;
+            pic.Image = ScreenCaptureEngine.RenderAnnotatedBitmap(
+                snapshot.ScreenshotPath,
+                block.ShowCallouts ? block.Callouts : null,
+                snapshot.WindowRect, block.ShowCallouts);
+            old?.Dispose();
+        }
+
+        private static void RenumberCallouts(List<CalloutItem> callouts)
+        {
+            for (int i = 0; i < callouts.Count; i++)
+                callouts[i].Number = i + 1;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  HELPERS
+        // ═══════════════════════════════════════════════════════════════════
+
+        private void RefreshProcessList()
+        {
+            _processes = UiInspector.GetWpfProcesses();
+            cmbProcess.Items.Clear();
+            foreach (var p in _processes)
+                cmbProcess.Items.Add($"[{p.Pid}] {p.Name} — {Trunc(p.Title, 35)}");
+            if (cmbProcess.Items.Count > 0) cmbProcess.SelectedIndex = 0;
+        }
+
+        private void SetBusy(bool busy, string msg)
+        {
+            progressBar.Visible = busy;
+            progressBar.Style   = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
+            if (!string.IsNullOrEmpty(msg)) lblStatus.Text = msg;
         }
 
         private void UpdateProgress(int done, int total)
@@ -647,36 +886,132 @@ namespace AIAssistant
             progressBar.Style   = ProgressBarStyle.Continuous;
             progressBar.Maximum = Math.Max(1, total);
             progressBar.Value   = Math.Min(done, total);
-            lblStatus.Text      = $"생성 중... {done}/{total}개 완료";
+            lblStatus.Text      = $"✨ 생성 중... {done}/{total}";
         }
 
         private string GetSolutionDirectory()
         {
             try
             {
-                var dte = Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
-                string solPath = dte?.Solution?.FullName;
-                return string.IsNullOrEmpty(solPath) ? null : Path.GetDirectoryName(solPath);
+                var dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
+                string sol = dte?.Solution?.FullName;
+                return string.IsNullOrEmpty(sol) ? null : Path.GetDirectoryName(sol);
             }
             catch { return null; }
         }
 
-        private Button CreateToolBtn(string text, Color back)
+        private Control FindBtn(string tag)
+        {
+            foreach (Control c in pnlToolbar.Controls)
+                if (c.Tag as string == tag) return c;
+            return new Control(); // null-safe fallback
+        }
+
+        private static T FindControlByTag<T>(Panel parent, string tag) where T : Control
+        {
+            foreach (Control c in parent.Controls)
+                if (c is T t && (c.Tag as string) == tag) return t;
+            return null;
+        }
+
+        // ── Card painting ─────────────────────────────────────────────────
+
+        private static void PaintCardBorder(Graphics g, Panel card, Color borderColor, int width)
+        {
+            using (var pen = new Pen(borderColor, width))
+            {
+                int r = 6; // corner radius
+                var rect = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
+                var path = RoundedRect(rect, r);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.DrawPath(pen, path);
+            }
+        }
+
+        private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
+        {
+            var path = new GraphicsPath();
+            int d = radius * 2;
+            path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+            path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
+            path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
+            path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        // ── Control factory ───────────────────────────────────────────────
+
+        private ComboBox CreateCombo(int w)
+        {
+            var cmb = new ComboBox
+            {
+                Width = w, DropDownStyle = ComboBoxStyle.DropDownList,
+                BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                FlatStyle = FlatStyle.Flat, Font = FNT_SMALL,
+                Margin = new Padding(0, 2, 4, 0)
+            };
+            cmb.DropDown += (s, e) => AutoWidenCombo(cmb);
+            return cmb;
+        }
+
+        private static void AddLabel(FlowLayoutPanel parent, string text, int topPad)
+        {
+            parent.Controls.Add(new Label
+            {
+                Text = text, AutoSize = true, ForeColor = CLR_TEXT_DIM,
+                Font = FNT_SMALL, Padding = new Padding(0, topPad + 2, 2, 0)
+            });
+        }
+
+        private static void AddSpacer(FlowLayoutPanel parent, int w)
+        {
+            parent.Controls.Add(new Panel { Width = w, Height = 1, BackColor = Color.Transparent });
+        }
+
+        private Button CreateAccentBtn(string text, Color bg)
         {
             var btn = new Button
             {
-                Text = text, Height = 26, AutoSize = true,
-                FlatStyle = FlatStyle.Flat, BackColor = back,
-                ForeColor = Color.White, Font = new Font("Segoe UI", 8.5f),
-                Margin = new Padding(2, 0, 2, 0), Padding = new Padding(6, 0, 6, 0)
+                Text = text, Height = 28, AutoSize = true,
+                FlatStyle = FlatStyle.Flat, BackColor = bg,
+                ForeColor = Color.White, Font = FNT_BTN,
+                Margin = new Padding(3, 0, 3, 0), Padding = new Padding(10, 0, 10, 0),
+                Cursor = Cursors.Hand
             };
             btn.FlatAppearance.BorderSize = 0;
             return btn;
         }
 
-        private static void AutoWidenCombo(object sender, EventArgs e)
+        private Button CreateIconBtn(string icon, string tooltip, Color bg)
         {
-            var cb = (ComboBox)sender;
+            var btn = new Button
+            {
+                Text = icon, Width = 28, Height = 28,
+                FlatStyle = FlatStyle.Flat, BackColor = bg,
+                ForeColor = CLR_TEXT, Font = FNT_BTN,
+                Margin = new Padding(2, 0, 2, 0), Cursor = Cursors.Hand
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            new ToolTip().SetToolTip(btn, tooltip);
+            return btn;
+        }
+
+        private static Button CreateSmallBtn(string text, Color bg)
+        {
+            var btn = new Button
+            {
+                Text = text, Width = 26, Height = 22,
+                FlatStyle = FlatStyle.Flat, BackColor = bg,
+                ForeColor = Color.White, Font = new Font("Segoe UI", 7.5f),
+                Cursor = Cursors.Hand
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            return btn;
+        }
+
+        private static void AutoWidenCombo(ComboBox cb)
+        {
             int max = cb.Width;
             using (var g = cb.CreateGraphics())
                 foreach (var item in cb.Items)
@@ -688,28 +1023,21 @@ namespace AIAssistant
             cb.DropDownWidth = max;
         }
 
-        // Dispose
+        private static string GetCircle(int n) =>
+            n >= 1 && n <= 20 ? ((char)(0x2460 + n - 1)).ToString() : $"({n})";
+
+        private static string Trunc(string t, int max) =>
+            t?.Length > max ? t.Substring(0, max) + "…" : (t ?? "");
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
                 _cts?.Dispose();
-                picScreenshot.Image?.Dispose();
-                // Clean up temp dir
                 try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, true); }
                 catch { }
             }
             base.Dispose(disposing);
-        }
-    }
-
-    // Extension for tooltip on Button (avoids ToolTip control overhead)
-    internal static class ButtonExtensions
-    {
-        public static void ToolTipText(this Button btn, string text)
-        {
-            var tt = new System.Windows.Forms.ToolTip();
-            tt.SetToolTip(btn, text);
         }
     }
 }

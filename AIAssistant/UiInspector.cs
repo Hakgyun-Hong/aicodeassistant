@@ -116,31 +116,120 @@ namespace AIAssistant
                 var snap = CaptureSingleWindow(root, hwnd, winTitle, null, tag, tempDir);
                 snapshots.Add(snap);
 
-                // Step 2 — find TabControl and navigate each TabItem
-                var tabControls = FindAll(root, ControlType.Tab);
-                foreach (var tabCtrl in tabControls)
-                {
-                    var tabItems = FindAll(tabCtrl, ControlType.TabItem);
-                    foreach (var tabItem in tabItems)
-                    {
-                        string tabName = SafeGet(tabItem, AutomationElement.NameProperty, "");
-                        if (string.IsNullOrWhiteSpace(tabName)) continue;
-
-                        // Click the tab
-                        if (TryInvoke(tabItem) || TrySelect(tabItem))
-                        {
-                            System.Threading.Thread.Sleep(400); // let UI render
-                            progress?.Invoke($"  Tab: {winTitle} › {tabName}");
-
-                            tag = $"win{snapshotIndex++}";
-                            var tabSnap = CaptureSingleWindow(root, hwnd, winTitle, tabName, tag, tempDir);
-                            snapshots.Add(tabSnap);
-                        }
-                    }
-                }
+                // Auto-crawl all navigable elements (not just tabs)
+                CrawlNavigableElements(root, hwnd, winTitle, pid, tempDir,
+                    ref snapshotIndex, snapshots, progress);
             }
 
             return snapshots;
+        }
+
+        /// <summary>
+        /// Crawls all types of navigable elements: TabItem, MenuItem, TreeItem, ListItem.
+        /// Each activatable element is clicked → wait → capture.
+        /// </summary>
+        private static void CrawlNavigableElements(
+            AutomationElement root, IntPtr hwnd, string winTitle, int pid,
+            string tempDir, ref int snapshotIndex,
+            List<WindowSnapshot> snapshots, Action<string> progress)
+        {
+            // ── Tab Items ──
+            CrawlByType(root, hwnd, winTitle, ControlType.Tab, ControlType.TabItem,
+                "Tab", tempDir, ref snapshotIndex, snapshots, progress);
+
+            // ── Menu Items (top-level only, depth-1) ──
+            CrawlMenuItems(root, hwnd, winTitle, tempDir, ref snapshotIndex, snapshots, progress);
+
+            // ── TreeView Items (expanded nodes) ──
+            CrawlByType(root, hwnd, winTitle, ControlType.Tree, ControlType.TreeItem,
+                "Tree", tempDir, ref snapshotIndex, snapshots, progress);
+
+            // ── ListBox / ListView Items ──
+            CrawlByType(root, hwnd, winTitle, ControlType.List, ControlType.ListItem,
+                "List", tempDir, ref snapshotIndex, snapshots, progress);
+
+            // ── Check for newly opened child windows after navigation ──
+            System.Threading.Thread.Sleep(300);
+            var newWindows = GetAllWindowsForProcess(pid);
+            foreach (var childHwnd in newWindows)
+            {
+                if (snapshots.Any(s => s.Handle == childHwnd)) continue;
+                var childRoot = SafeFromHandle(childHwnd);
+                if (childRoot == null) continue;
+                string childTitle = SafeGet(childRoot, AutomationElement.NameProperty, "");
+                if (string.IsNullOrWhiteSpace(childTitle)) continue;
+
+                progress?.Invoke($"  Dialog: {childTitle}");
+                string tag = $"win{snapshotIndex++}";
+                var childSnap = CaptureSingleWindow(childRoot, childHwnd, childTitle,
+                    $"Dialog from {winTitle}", tag, tempDir);
+                snapshots.Add(childSnap);
+            }
+        }
+
+        private static void CrawlByType(
+            AutomationElement root, IntPtr hwnd, string winTitle,
+            ControlType containerType, ControlType itemType, string label,
+            string tempDir, ref int snapshotIndex,
+            List<WindowSnapshot> snapshots, Action<string> progress)
+        {
+            var containers = FindAll(root, containerType);
+            foreach (var container in containers)
+            {
+                var items = FindAll(container, itemType);
+                foreach (var item in items)
+                {
+                    string itemName = SafeGet(item, AutomationElement.NameProperty, "");
+                    if (string.IsNullOrWhiteSpace(itemName)) continue;
+
+                    if (TrySelect(item) || TryInvoke(item))
+                    {
+                        System.Threading.Thread.Sleep(400);
+                        progress?.Invoke($"  {label}: {winTitle} › {itemName}");
+
+                        string tag = $"win{snapshotIndex++}";
+                        var snap = CaptureSingleWindow(root, hwnd, winTitle, itemName, tag, tempDir);
+                        snapshots.Add(snap);
+                    }
+                }
+            }
+        }
+
+        private static void CrawlMenuItems(
+            AutomationElement root, IntPtr hwnd, string winTitle,
+            string tempDir, ref int snapshotIndex,
+            List<WindowSnapshot> snapshots, Action<string> progress)
+        {
+            var menuBars = FindAll(root, ControlType.MenuBar);
+            foreach (var menuBar in menuBars)
+            {
+                var menuItems = FindAll(menuBar, ControlType.MenuItem);
+                foreach (var menuItem in menuItems)
+                {
+                    string name = SafeGet(menuItem, AutomationElement.NameProperty, "");
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+
+                    // Expand the menu (don't click — just expand)
+                    if (menuItem.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out object ecp))
+                    {
+                        try
+                        {
+                            ((ExpandCollapsePattern)ecp).Expand();
+                            System.Threading.Thread.Sleep(300);
+                            progress?.Invoke($"  Menu: {winTitle} › {name}");
+
+                            string tag = $"win{snapshotIndex++}";
+                            var snap = CaptureSingleWindow(root, hwnd, winTitle, $"Menu: {name}", tag, tempDir);
+                            snapshots.Add(snap);
+
+                            // Collapse back
+                            ((ExpandCollapsePattern)ecp).Collapse();
+                            System.Threading.Thread.Sleep(200);
+                        }
+                        catch { }
+                    }
+                }
+            }
         }
 
         // ─── Private: single-window capture ──────────────────────────────────
