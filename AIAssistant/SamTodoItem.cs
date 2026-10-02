@@ -95,20 +95,33 @@ namespace AIAssistant
         public string UnifiedDiff        { get; set; }
         public string RiskLevel          { get; set; }
         public string OriginalFileHash   { get; set; }
+        public string ExtractedFileName  { get; set; }
+        public string ExtractedFileContent { get; set; }
 
         public DateTimeOffset  CreatedAt { get; set; } = DateTimeOffset.Now;
         public DateTimeOffset? UpdatedAt { get; set; }
 
         // ─── Computed Display Properties ──────────────────────────────────
 
-        public string ShortFilePath =>
-            string.IsNullOrEmpty(RelativePath)
-                ? (string.IsNullOrEmpty(FilePath) ? "" : System.IO.Path.GetFileName(FilePath))
-                : System.IO.Path.GetFileName(RelativePath);
+        public bool HasExtractedFile =>
+            !string.IsNullOrEmpty(ExtractedFileName) && !string.IsNullOrEmpty(ExtractedFileContent);
+
+        public string EffectiveRelativePath =>
+            !string.IsNullOrEmpty(RelativePath) ? RelativePath : (!string.IsNullOrEmpty(ModulePath) ? ModulePath : "");
+
+        public string ShortFilePath
+        {
+            get
+            {
+                string p = EffectiveRelativePath;
+                if (!string.IsNullOrEmpty(p)) return System.IO.Path.GetFileName(p);
+                return string.IsNullOrEmpty(FilePath) ? "" : System.IO.Path.GetFileName(FilePath);
+            }
+        }
 
         /// <summary>True when this metric row has a direct source file + line number.</summary>
         public bool HasCodeLocation =>
-            !string.IsNullOrEmpty(RelativePath) &&
+            !string.IsNullOrEmpty(EffectiveRelativePath) &&
             Metric != "MCD" &&   // ModuleCircularDependency
             Metric != "DepC";    // DependencyComplexity
 

@@ -240,7 +240,10 @@ namespace AIAssistant
                 case "BLOC":            TrySetInt(val, v => item.BLOC = v); break;
                 case "FUNCTIONCNT":     TrySetInt(val, v => item.FunctionCnt = v); break;
                 case "BLOCXFUNCTIONCNT":TrySetInt(val, v => item.BLOCxFunctionCnt = v); break;
-                case "MODULEPATH":      item.ModulePath = val;        break;
+                case "MODULEPATH":
+                    item.ModulePath = val;
+                    if (string.IsNullOrEmpty(item.RelativePath)) item.RelativePath = val;
+                    break;
             }
         }
 
