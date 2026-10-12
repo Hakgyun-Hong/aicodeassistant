@@ -49,7 +49,10 @@ namespace AIAssistant
 
         // ─── Controls ─────────────────────────────────────────────────────
         private FlowLayoutPanel     pnlToolbar;
-        private Panel               pnlCards;         // scrollable card container
+        private Panel               pnlCards;         // scrollable card container (legacy mode)
+        private SplitContainer      splitMain;        // 2-pane UI for View-Centric mode
+        private TreeView            treePages;        // Left pane: Menu/View hierarchy
+        private Panel               pnlViewDetail;    // Right pane: view editor
         private Label               lblStatus;
         private ProgressBar         progressBar;
         private ComboBox            cmbProcess;
@@ -62,6 +65,12 @@ namespace AIAssistant
         private ManualGenerator         _generator;
         private CancellationTokenSource _cts;
         private string                  _tempDir;
+
+        // View-Centric (XML Menu -> Prism View) Mode State
+        private ManualProject           _project;
+        private PrismViewResolver       _viewResolver;
+        private ViewManualGenerator     _viewGenerator;
+        private ManualPage              _selectedPage;
 
         private List<(int Pid, string Name, string Title, IntPtr Hwnd)> _processes
             = new List<(int, string, string, IntPtr)>();
@@ -76,6 +85,8 @@ namespace AIAssistant
                 if (InvokeRequired) BeginInvoke((Action)(() => UpdateProgress(done, total)));
                 else UpdateProgress(done, total);
             };
+
+            _viewGenerator = new ViewManualGenerator();
 
             _tempDir = Path.Combine(Path.GetTempPath(),
                 "AIAssistant_Manual_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
@@ -101,28 +112,48 @@ namespace AIAssistant
                 Dock = DockStyle.Top, Height = 44,
                 BackColor = CLR_TOOLBAR,
                 Padding = new Padding(12, 8, 12, 8),
-                WrapContents = false
+                WrapContents = false,
+                AutoScroll = true
             };
 
             // Mode
             AddLabel(pnlToolbar, "Mode", 4);
-            cmbMode = CreateCombo(145);
-            cmbMode.Items.AddRange(new object[] { "📸 Current Screen", "🌐 Full App (Auto-Crawl)" });
+            cmbMode = CreateCombo(185);
+            cmbMode.Items.AddRange(new object[] { "📋 UI XML (View 단위)", "📸 Current Screen", "🌐 Full App (Auto-Crawl)" });
             cmbMode.SelectedIndex = 0;
+            cmbMode.SelectedIndexChanged += (s, e) => OnModeChanged();
             pnlToolbar.Controls.Add(cmbMode);
 
             AddSpacer(pnlToolbar, 8);
 
             // Target process
             AddLabel(pnlToolbar, "Target", 4);
-            cmbProcess = CreateCombo(230);
+            cmbProcess = CreateCombo(200);
             pnlToolbar.Controls.Add(cmbProcess);
 
-            var btnRefresh = CreateIconBtn("🔄", "Refresh", CLR_CARD);
+            var btnRefresh = CreateIconBtn("🔄", "Refresh Processes", CLR_CARD);
             btnRefresh.Click += (s, e) => RefreshProcessList();
             pnlToolbar.Controls.Add(btnRefresh);
 
-            AddSpacer(pnlToolbar, 12);
+            AddSpacer(pnlToolbar, 10);
+
+            // XML & Project Action buttons
+            var btnOpenXml = CreateAccentBtn("📂 Open XML", Color.FromArgb(70, 110, 150));
+            btnOpenXml.Tag = "btnOpenXml";
+            btnOpenXml.Click += BtnOpenXml_Click;
+            pnlToolbar.Controls.Add(btnOpenXml);
+
+            var btnSaveProj = CreateIconBtn("💾", "Save Project (.manual.json)", CLR_CARD);
+            btnSaveProj.Tag = "btnSaveProj";
+            btnSaveProj.Click += BtnSaveProj_Click;
+            pnlToolbar.Controls.Add(btnSaveProj);
+
+            var btnLoadProj = CreateIconBtn("📂", "Open Project (.manual.json)", CLR_CARD);
+            btnLoadProj.Tag = "btnLoadProj";
+            btnLoadProj.Click += BtnLoadProj_Click;
+            pnlToolbar.Controls.Add(btnLoadProj);
+
+            AddSpacer(pnlToolbar, 10);
 
             // Action buttons
             var btnCapture  = CreateAccentBtn("📸 Capture",  CLR_ACCENT);
@@ -159,19 +190,63 @@ namespace AIAssistant
                 Padding = new Padding(12, 0, 0, 0)
             };
 
-            // ── Card container (scrollable) ──
+            // ── Card container (scrollable - legacy mode) ──
             pnlCards = new Panel
             {
                 Dock = DockStyle.Fill,
                 AutoScroll = true,
                 BackColor = CLR_BG,
-                Padding = new Padding(0, 8, 0, 8)
+                Padding = new Padding(0, 8, 0, 8),
+                Visible = false
             };
 
-            // Welcome message
+            // ── Split container (View-Centric mode) ──
+            splitMain = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Vertical,
+                SplitterDistance = 280,
+                SplitterWidth = 5,
+                BackColor = CLR_CARD_BORDER
+            };
+
+            // Left: TreeView
+            treePages = new TreeView
+            {
+                Dock = DockStyle.Fill,
+                BackColor = CLR_TOOLBAR,
+                ForeColor = CLR_TEXT,
+                BorderStyle = BorderStyle.None,
+                Font = FNT_BODY,
+                FullRowSelect = true,
+                ShowLines = true,
+                HideSelection = false
+            };
+            treePages.AfterSelect += (s, e) =>
+            {
+                if (e.Node?.Tag is ManualPage page)
+                {
+                    _selectedPage = page;
+                    RenderViewDetail(page);
+                }
+            };
+            splitMain.Panel1.Controls.Add(treePages);
+
+            // Right: Detail panel
+            pnlViewDetail = new Panel
+            {
+                Dock = DockStyle.Fill,
+                AutoScroll = true,
+                BackColor = CLR_BG,
+                Padding = new Padding(12)
+            };
+            splitMain.Panel2.Controls.Add(pnlViewDetail);
+
+            // Welcome message in pnlViewDetail & pnlCards
             ShowWelcomeCard();
 
             // Assemble (bottom-up order in Controls.Add)
+            Controls.Add(splitMain);
             Controls.Add(pnlCards);
             Controls.Add(progressBar);
             Controls.Add(pnlToolbar);
@@ -610,43 +685,561 @@ namespace AIAssistant
             {
                 "📖  WPF Auto Manual Generator",
                 "",
-                "1.  대상 WPF Application을 실행합니다",
-                "2.  Target 드롭다운에서 프로세스를 선택합니다",
-                "3.  Mode를 선택합니다 (현재 화면 / 전체 앱)",
-                "4.  📸 Capture를 클릭하면 UI 수집 + 스크린샷이 진행됩니다",
-                "5.  ✨ Generate를 클릭하면 LLM이 매뉴얼을 작성합니다",
-                "6.  각 스텝 카드에서 내용을 편집합니다",
-                "7.  📄 Export DOCX로 Word 파일을 생성합니다"
+                "【📋 UI XML (View 단위) 모드】",
+                "1.  📂 Open XML 버튼을 눌러 대상 프로그램의 UI 정의 XML을 엽니다.",
+                "2.  XML의 <Menu> 계층(DisplayName)과 Prism View/ViewModel 소스가 자동 매핑됩니다.",
+                "3.  좌측 메뉴 트리에서 원하는 페이지를 선택하거나, 📸 Capture로 등록된 View를 자동 방문·캡처합니다.",
+                "4.  ✨ Generate로 View XAML 및 ViewModel 코드를 바탕으로 LLM 매뉴얼을 작성합니다.",
+                "5.  우측 편집 패널에서 개요, 컨트롤 설명표, 절차, 주의사항을 수정한 후 📄 Export DOCX를 클릭하세요.",
+                "",
+                "【📸 직접 화면 캡처 모드】",
+                "Mode를 '📸 Current Screen' 또는 '🌐 Full App'으로 변경하여 실행 중인 창을 직접 캡처할 수도 있습니다."
             };
             int y = 20;
             foreach (var line in lines)
             {
+                bool isHead = line.StartsWith("📖") || line.StartsWith("【");
                 var lbl = new Label
                 {
                     Text = line,
-                    Font = line.StartsWith("📖") ? FNT_TITLE : FNT_BODY,
-                    ForeColor = line.StartsWith("📖") ? CLR_ACCENT : CLR_TEXT,
+                    Font = line.StartsWith("📖") ? FNT_TITLE : (isHead ? FNT_TITLE : FNT_BODY),
+                    ForeColor = line.StartsWith("📖") ? CLR_ACCENT : (isHead ? CLR_ACCENT2 : CLR_TEXT),
                     AutoSize = true, Location = new Point(24, y), BackColor = CLR_CARD
                 };
                 card.Controls.Add(lbl);
-                y += line.StartsWith("📖") ? 28 : 18;
+                y += line.StartsWith("📖") ? 28 : (isHead ? 24 : 18);
             }
+            card.Height = y + 20;
             pnlCards.Controls.Add(card);
+
+            if (pnlViewDetail != null)
+            {
+                pnlViewDetail.Controls.Clear();
+                var cardDetail = new Panel
+                {
+                    Width = Math.Max(400, pnlViewDetail.ClientSize.Width - 48),
+                    Height = card.Height, BackColor = CLR_CARD, Location = new Point(20, 20)
+                };
+                cardDetail.Paint += (s, e) => PaintCardBorder(e.Graphics, cardDetail, CLR_ACCENT, 1);
+                int dy = 20;
+                foreach (var line in lines)
+                {
+                    bool isHead = line.StartsWith("📖") || line.StartsWith("【");
+                    var lbl = new Label
+                    {
+                        Text = line,
+                        Font = line.StartsWith("📖") ? FNT_TITLE : (isHead ? FNT_TITLE : FNT_BODY),
+                        ForeColor = line.StartsWith("📖") ? CLR_ACCENT : (isHead ? CLR_ACCENT2 : CLR_TEXT),
+                        AutoSize = true, Location = new Point(24, dy), BackColor = CLR_CARD
+                    };
+                    cardDetail.Controls.Add(lbl);
+                    dy += line.StartsWith("📖") ? 28 : (isHead ? 24 : 18);
+                }
+                pnlViewDetail.Controls.Add(cardDetail);
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════════
         //  ACTIONS
         // ═══════════════════════════════════════════════════════════════════
 
-        // ── Capture ──
+        private void OnModeChanged()
+        {
+            bool isXmlMode = cmbMode.SelectedIndex == 0;
+            splitMain.Visible = isXmlMode;
+            pnlCards.Visible = !isXmlMode;
+            FindBtn("btnOpenXml").Visible = isXmlMode;
+            FindBtn("btnSaveProj").Visible = isXmlMode;
+            FindBtn("btnLoadProj").Visible = isXmlMode;
+
+            if (isXmlMode)
+            {
+                lblStatus.Text = _project == null
+                    ? "📂 Open XML로 메뉴 XML 파일을 열거나 💾 프로젝트를 불러오세요."
+                    : $"📋 프로젝트: {_project.AllPages().Count()}개 페이지";
+                if (_project == null) ShowWelcomeCard();
+            }
+            else
+            {
+                lblStatus.Text = "WPF 앱을 실행 → Target 선택 → 📸 Capture";
+                if (_document == null) ShowWelcomeCard();
+            }
+        }
+
+        // ── XML & Project actions ──
+
+        private void BtnOpenXml_Click(object sender, EventArgs e)
+        {
+            using (var dlg = new OpenFileDialog
+            {
+                Title = "WPF UI 정의 XML 파일 선택",
+                Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*"
+            })
+            {
+                if (dlg.ShowDialog() != DialogResult.OK) return;
+
+                try
+                {
+                    var roots = UiMenuXmlParser.Parse(dlg.FileName);
+                    if (roots.Count == 0)
+                    {
+                        MessageBox.Show("XML에서 유효한 <Menu> 요소를 찾지 못했습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    string solDir = GetSolutionDirectory() ?? Path.GetDirectoryName(dlg.FileName);
+                    _project = new ManualProject
+                    {
+                        AppName    = Path.GetFileNameWithoutExtension(dlg.FileName),
+                        Title      = $"{Path.GetFileNameWithoutExtension(dlg.FileName)} 사용자 매뉴얼",
+                        UiXmlPath  = dlg.FileName,
+                        SourceRoot = solDir,
+                        Roots      = roots
+                    };
+
+                    _viewResolver = new PrismViewResolver(solDir);
+                    SetBusy(true, "🔍 Prism View/ViewModel 소스 매핑 중...");
+
+                    Task.Run(() =>
+                    {
+                        _viewResolver.BuildIndex();
+                        foreach (var page in _project.AllPages())
+                            _viewResolver.ApplyTo(page);
+                    }).ContinueWith(t =>
+                    {
+                        SetBusy(false, "");
+                        PopulatePagesTree();
+                        lblStatus.Text = $"✅ XML 로드 완료: {_project.AllPages().Count()}개 메뉴 (Prism View 매핑 완료)";
+                        FindBtn("btnGenerate").Enabled = true;
+                        FindBtn("btnExport").Enabled   = true;
+                    }, TaskScheduler.FromCurrentSynchronizationContext());
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"XML 파일 파싱 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void BtnSaveProj_Click(object sender, EventArgs e)
+        {
+            if (_project == null) { MessageBox.Show("저장할 프로젝트가 없습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+
+            string path = _project.ProjectPath;
+            if (string.IsNullOrEmpty(path))
+            {
+                using (var dlg = new SaveFileDialog
+                {
+                    Title = "Manual Project 저장",
+                    Filter = ManualProjectStore.FileFilter,
+                    FileName = $"{_project.AppName}_Manual.manual.json"
+                })
+                {
+                    if (dlg.ShowDialog() != DialogResult.OK) return;
+                    path = dlg.FileName;
+                }
+            }
+
+            try
+            {
+                ManualProjectStore.Save(_project, path);
+                lblStatus.Text = $"💾 프로젝트 저장 완료: {Path.GetFileName(path)}";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"프로젝트 저장 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void BtnLoadProj_Click(object sender, EventArgs e)
+        {
+            using (var dlg = new OpenFileDialog
+            {
+                Title = "Manual Project 열기",
+                Filter = ManualProjectStore.FileFilter
+            })
+            {
+                if (dlg.ShowDialog() != DialogResult.OK) return;
+
+                try
+                {
+                    _project = ManualProjectStore.Load(dlg.FileName);
+                    string solDir = _project.SourceRoot ?? GetSolutionDirectory();
+                    _viewResolver = new PrismViewResolver(solDir);
+                    _viewResolver.BuildIndex();
+
+                    PopulatePagesTree();
+                    lblStatus.Text = $"📂 프로젝트 로드 완료: {_project.AllPages().Count()}개 페이지";
+                    FindBtn("btnGenerate").Enabled = true;
+                    FindBtn("btnExport").Enabled   = true;
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"프로젝트 열기 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        // ── TreeView Population & View Detail Panel ──
+
+        private void PopulatePagesTree()
+        {
+            treePages.BeginUpdate();
+            treePages.Nodes.Clear();
+
+            if (_project != null)
+            {
+                foreach (var root in _project.Roots)
+                    treePages.Nodes.Add(BuildTreeNode(root));
+                treePages.ExpandAll();
+                if (treePages.Nodes.Count > 0)
+                    treePages.SelectedNode = treePages.Nodes[0];
+            }
+
+            treePages.EndUpdate();
+        }
+
+        private TreeNode BuildTreeNode(ManualPage page)
+        {
+            string icon = page.HasScreenshot && page.HasContent ? "✅ " :
+                          page.HasScreenshot ? "📸 " :
+                          page.HasContent ? "📝 " :
+                          page.HasView ? "📄 " : "📁 ";
+            string text = icon + page.DisplayName + (string.IsNullOrEmpty(page.ViewName) ? "" : $" ({page.ViewName})");
+            var node = new TreeNode(text) { Tag = page };
+            foreach (var ch in page.Children)
+                node.Nodes.Add(BuildTreeNode(ch));
+            return node;
+        }
+
+        private void RenderViewDetail(ManualPage page)
+        {
+            pnlViewDetail.SuspendLayout();
+            pnlViewDetail.Controls.Clear();
+
+            if (page == null)
+            {
+                pnlViewDetail.ResumeLayout();
+                return;
+            }
+
+            int w = Math.Max(480, pnlViewDetail.ClientSize.Width - 32);
+            int y = 12;
+
+            // Header Box
+            var pnlHead = new Panel
+            {
+                Location = new Point(12, y), Width = w, Height = 95,
+                BackColor = CLR_CARD
+            };
+            pnlHead.Paint += (s, e) => PaintCardBorder(e.Graphics, pnlHead, CLR_ACCENT, 1);
+
+            var lblTitle = new Label
+            {
+                Text = $"📄 {page.DisplayName}  ›  {page.PathText}",
+                Font = FNT_TITLE, ForeColor = CLR_ACCENT, AutoSize = true,
+                Location = new Point(12, 10), BackColor = CLR_CARD
+            };
+            pnlHead.Controls.Add(lblTitle);
+
+            var lblView = new Label
+            {
+                Text = $"View: {page.ViewName ?? "(없음)"}  |  ViewModel: {page.ViewModelTypeName ?? "(미지정)"}",
+                Font = FNT_SMALL, ForeColor = CLR_TEXT, AutoSize = true,
+                Location = new Point(14, 38), BackColor = CLR_CARD
+            };
+            pnlHead.Controls.Add(lblView);
+
+            var lblSrc = new Label
+            {
+                Text = $"XAML: {Trunc(page.ViewXamlPath ?? "미발견", 55)}  /  VM: {Trunc(page.ViewModelPath ?? "미발견", 55)}",
+                Font = FNT_SMALL, ForeColor = CLR_TEXT_DIM, AutoSize = true,
+                Location = new Point(14, 58), BackColor = CLR_CARD
+            };
+            pnlHead.Controls.Add(lblSrc);
+
+            // Action Buttons for this Page
+            var btnNavCap = CreateAccentBtn("🎯 Navigate & 📸 Capture", CLR_ACCENT);
+            btnNavCap.Location = new Point(w - 380, 10);
+            btnNavCap.Click += async (s, e) => await CapturePageAsync(page);
+            pnlHead.Controls.Add(btnNavCap);
+
+            var btnGenThis = CreateAccentBtn("✨ Generate (LLM)", CLR_ACCENT2);
+            btnGenThis.Location = new Point(w - 180, 10);
+            btnGenThis.Click += async (s, e) => await GeneratePageAsync(page);
+            pnlHead.Controls.Add(btnGenThis);
+
+            pnlViewDetail.Controls.Add(pnlHead);
+            y += pnlHead.Height + 14;
+
+            // Screenshot Preview
+            int imgH = 260;
+            var pnlImg = new Panel
+            {
+                Location = new Point(12, y), Width = w, Height = imgH + 40,
+                BackColor = CLR_CARD
+            };
+            pnlImg.Paint += (s, e) => PaintCardBorder(e.Graphics, pnlImg, CLR_CARD_BORDER, 1);
+
+            var lblImgHead = new Label
+            {
+                Text = $"화면 캡처 (Callouts: {page.Callouts.Count}개)",
+                Font = FNT_SMALL, ForeColor = CLR_TEXT_DIM, AutoSize = true,
+                Location = new Point(12, 8), BackColor = CLR_CARD
+            };
+            pnlImg.Controls.Add(lblImgHead);
+
+            var chkShowCallouts = new CheckBox
+            {
+                Text = "Show Callouts", Checked = page.ShowCallouts,
+                ForeColor = CLR_TEXT_DIM, Font = FNT_SMALL,
+                AutoSize = true, Location = new Point(w - 140, 8),
+                BackColor = CLR_CARD, FlatStyle = FlatStyle.Flat
+            };
+
+            var pic = new PictureBox
+            {
+                Location = new Point(12, 32), Width = w - 24, Height = imgH,
+                SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(18, 18, 26),
+                BorderStyle = BorderStyle.None
+            };
+
+            Action refreshPic = () =>
+            {
+                if (page.HasScreenshot)
+                {
+                    var old = pic.Image;
+                    pic.Image = ScreenCaptureEngine.RenderAnnotatedBitmap(
+                        page.ScreenshotPath, page.ShowCallouts ? page.CalloutItems() : null,
+                        page.WindowRect, page.ShowCallouts);
+                    old?.Dispose();
+                }
+                else pic.Image = null;
+            };
+
+            chkShowCallouts.CheckedChanged += (s, e) =>
+            {
+                page.ShowCallouts = chkShowCallouts.Checked;
+                refreshPic();
+            };
+            pnlImg.Controls.Add(chkShowCallouts);
+            pnlImg.Controls.Add(pic);
+            refreshPic();
+
+            pnlViewDetail.Controls.Add(pnlImg);
+            y += pnlImg.Height + 14;
+
+            // Summary (개요)
+            var lblSum = new Label { Text = "📝 화면 개요 (Summary)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(12, y), AutoSize = true };
+            pnlViewDetail.Controls.Add(lblSum);
+            y += 24;
+
+            var txtSum = new TextBox
+            {
+                Text = page.Summary ?? "", Location = new Point(12, y), Width = w, Height = 75,
+                Multiline = true, ScrollBars = ScrollBars.Vertical, BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                BorderStyle = BorderStyle.FixedSingle, Font = FNT_BODY
+            };
+            txtSum.TextChanged += (s, e) => page.Summary = txtSum.Text;
+            pnlViewDetail.Controls.Add(txtSum);
+            y += txtSum.Height + 14;
+
+            // Controls Grid (컨트롤 설명 목록)
+            var lblCtrl = new Label { Text = "🎛 컨트롤 설명 (Controls)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(12, y), AutoSize = true };
+            pnlViewDetail.Controls.Add(lblCtrl);
+            y += 24;
+
+            var grid = new DataGridView
+            {
+                Location = new Point(12, y), Width = w, Height = 170,
+                BackgroundColor = CLR_CARD, ForeColor = CLR_TEXT,
+                GridColor = CLR_CARD_BORDER, BorderStyle = BorderStyle.None,
+                RowHeadersVisible = false, AllowUserToAddRows = true,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                EnableHeadersVisualStyles = false
+            };
+            grid.ColumnHeadersDefaultCellStyle.BackColor = CLR_TOOLBAR;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = CLR_TEXT;
+            grid.DefaultCellStyle.BackColor = CLR_INPUT;
+            grid.DefaultCellStyle.ForeColor = CLR_TEXT;
+            grid.DefaultCellStyle.SelectionBackColor = CLR_CARD_HOVER;
+            grid.DefaultCellStyle.SelectionForeColor = Color.White;
+
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "번호", DataPropertyName = "Callout", Width = 50, FillWeight = 15 });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "컨트롤 이름", DataPropertyName = "Name", Width = 150, FillWeight = 35 });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "기능 / 사용 조건", DataPropertyName = "Description", FillWeight = 50 });
+
+            var bindingList = new System.ComponentModel.BindingList<ControlDesc>(page.Controls);
+            grid.DataSource = bindingList;
+            pnlViewDetail.Controls.Add(grid);
+            y += grid.Height + 14;
+
+            // Procedures (사용 절차)
+            var lblProc = new Label { Text = "📋 작업/사용 절차 (Procedures)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(12, y), AutoSize = true };
+            pnlViewDetail.Controls.Add(lblProc);
+            y += 24;
+
+            var txtProc = new TextBox
+            {
+                Text = page.Procedures ?? "", Location = new Point(12, y), Width = w, Height = 75,
+                Multiline = true, ScrollBars = ScrollBars.Vertical, BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                BorderStyle = BorderStyle.FixedSingle, Font = FNT_BODY
+            };
+            txtProc.TextChanged += (s, e) => page.Procedures = txtProc.Text;
+            pnlViewDetail.Controls.Add(txtProc);
+            y += txtProc.Height + 14;
+
+            // Notes (주의사항)
+            var lblNotes = new Label { Text = "⚠️ 주의사항 (Notes)", Font = FNT_BODY, ForeColor = Color.FromArgb(220, 160, 50), Location = new Point(12, y), AutoSize = true };
+            pnlViewDetail.Controls.Add(lblNotes);
+            y += 24;
+
+            var txtNotes = new TextBox
+            {
+                Text = page.Notes ?? "", Location = new Point(12, y), Width = w, Height = 60,
+                Multiline = true, ScrollBars = ScrollBars.Vertical, BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                BorderStyle = BorderStyle.FixedSingle, Font = FNT_BODY
+            };
+            txtNotes.TextChanged += (s, e) => page.Notes = txtNotes.Text;
+            pnlViewDetail.Controls.Add(txtNotes);
+
+            pnlViewDetail.ResumeLayout();
+        }
+
+        private async Task CapturePageAsync(ManualPage page)
+        {
+            if (cmbProcess.SelectedIndex < 0 || _processes.Count == 0)
+            {
+                MessageBox.Show("먼저 대상 WPF Process를 Target 드롭다운에서 선택하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var proc = _processes[cmbProcess.SelectedIndex];
+            SetBusy(true, $"🎯 '{page.DisplayName}' 화면으로 접근 및 캡처 중...");
+
+            try
+            {
+                await Task.Run(() =>
+                {
+                    // If page has a nav path, try navigating
+                    if (page.NavPath.Count > 0)
+                    {
+                        ViewNavigator.NavigateTo(proc.Hwnd, page.NavPath, _project?.NavDelayMs ?? 1200,
+                            CancellationToken.None, msg => BeginInvoke((Action)(() => lblStatus.Text = msg)));
+                    }
+
+                    string xamlText = File.Exists(page.ViewXamlPath) ? File.ReadAllText(page.ViewXamlPath) : null;
+                    ViewNavigator.CaptureInto(page, proc.Hwnd, _tempDir, _project?.AllMenuNames(), xamlText);
+                });
+
+                page.Status = PageStatus.Captured;
+                RenderViewDetail(page);
+                PopulatePagesTree();
+                lblStatus.Text = $"✅ '{page.DisplayName}' 캡처 완료 (Callouts: {page.Callouts.Count}개)";
+            }
+            catch (Exception ex)
+            {
+                lblStatus.Text = $"⚠️ 캡처 실패: {ex.Message}";
+                MessageBox.Show($"캡처 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                SetBusy(false, "");
+            }
+        }
+
+        private async Task GeneratePageAsync(ManualPage page)
+        {
+            SetBusy(true, $"✨ '{page.DisplayName}' 매뉴얼 내용 LLM 요청 중...");
+            try
+            {
+                await _viewGenerator.GenerateAsync(_project, page, CancellationToken.None);
+                RenderViewDetail(page);
+                PopulatePagesTree();
+                lblStatus.Text = $"✅ '{page.DisplayName}' 매뉴얼 생성 완료";
+            }
+            catch (Exception ex)
+            {
+                lblStatus.Text = $"⚠️ 생성 오류: {ex.Message}";
+                MessageBox.Show($"LLM 생성 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                SetBusy(false, "");
+            }
+        }
+
+        // ── Main Action Handlers ──
+
+        // ── Capture (Batch or Screen) ──
         private async void BtnCapture_Click(object sender, EventArgs e)
         {
             if (cmbProcess.SelectedIndex < 0 || _processes.Count == 0)
             { lblStatus.Text = "⚠️ 먼저 대상 프로세스를 선택하세요."; return; }
 
-            SetBusy(true, "🔍 UI 수집 중...");
             var proc = _processes[cmbProcess.SelectedIndex];
-            var mode = cmbMode.SelectedIndex == 1 ? CaptureMode.FullApp : CaptureMode.CurrentScreen;
+
+            // 1) View-Centric Mode: Crawl registered XML pages
+            if (cmbMode.SelectedIndex == 0)
+            {
+                if (_project == null)
+                {
+                    MessageBox.Show("먼저 📂 Open XML 버튼으로 UI XML 파일을 열어주세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                var pagesToCap = _project.AllPages().Where(p => p.HasView && p.IsIncluded).ToList();
+                if (pagesToCap.Count == 0)
+                {
+                    MessageBox.Show("접근할 View가 등록된 페이지가 없습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                _cts?.Dispose();
+                _cts = new CancellationTokenSource();
+                SetBusy(true, $"🔍 {pagesToCap.Count}개 등록된 View 자동 접근 및 캡처 중...");
+                FindBtn("btnCancel").Enabled = true;
+
+                int done = 0;
+                try
+                {
+                    foreach (var p in pagesToCap)
+                    {
+                        _cts.Token.ThrowIfCancellationRequested();
+                        lblStatus.Text = $"🎯 접근 중 ({++done}/{pagesToCap.Count}): {p.PathText}";
+                        await Task.Run(() =>
+                        {
+                            ViewNavigator.NavigateTo(proc.Hwnd, p.NavPath, _project.NavDelayMs, _cts.Token);
+                            string xamlText = File.Exists(p.ViewXamlPath) ? File.ReadAllText(p.ViewXamlPath) : null;
+                            ViewNavigator.CaptureInto(p, proc.Hwnd, _tempDir, _project.AllMenuNames(), xamlText);
+                        }, _cts.Token);
+                        p.Status = PageStatus.Captured;
+                        UpdateProgress(done, pagesToCap.Count);
+                    }
+
+                    PopulatePagesTree();
+                    if (_selectedPage != null) RenderViewDetail(_selectedPage);
+                    lblStatus.Text = $"✅ {done}개 View 캡처 완료! 이제 ✨ Generate로 LLM 매뉴얼 작성을 진행하세요.";
+                }
+                catch (OperationCanceledException)
+                {
+                    lblStatus.Text = "⏹ 자동 캡처가 취소되었습니다.";
+                }
+                catch (Exception ex)
+                {
+                    lblStatus.Text = $"⚠️ 캡처 중 오류: {ex.Message}";
+                }
+                finally
+                {
+                    SetBusy(false, "");
+                    FindBtn("btnCancel").Enabled = false;
+                }
+                return;
+            }
+
+            // 2) Legacy Screen Mode (Current Screen / Full App)
+            SetBusy(true, "🔍 UI 수집 중...");
+            var mode = cmbMode.SelectedIndex == 2 ? CaptureMode.FullApp : CaptureMode.CurrentScreen;
 
             try
             {
@@ -698,15 +1291,55 @@ namespace AIAssistant
             }
         }
 
-        // ── Generate ──
+        // ── Generate (Batch) ──
         private async void BtnGenerate_Click(object sender, EventArgs e)
         {
-            if (_document == null) return;
             _cts?.Dispose();
             _cts = new CancellationTokenSource();
-
-            SetBusy(true, "✨ LLM 매뉴얼 생성 중...");
             FindBtn("btnCancel").Enabled = true;
+
+            // View-Centric mode
+            if (cmbMode.SelectedIndex == 0 && _project != null)
+            {
+                var pagesToGen = _project.AllPages().Where(p => p.IsIncluded && (p.HasScreenshot || p.HasSource)).ToList();
+                if (pagesToGen.Count == 0)
+                {
+                    MessageBox.Show("생성할 페이지가 없습니다. (캡처 또는 소스가 있는 페이지 필요)", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                SetBusy(true, $"✨ {pagesToGen.Count}개 페이지 매뉴얼 LLM 생성 중...");
+                int done = 0;
+                try
+                {
+                    foreach (var p in pagesToGen)
+                    {
+                        _cts.Token.ThrowIfCancellationRequested();
+                        lblStatus.Text = $"✨ LLM 작성 중 ({++done}/{pagesToGen.Count}): {p.DisplayName}";
+                        await _viewGenerator.GenerateAsync(_project, p, _cts.Token);
+                        UpdateProgress(done, pagesToGen.Count);
+                    }
+
+                    PopulatePagesTree();
+                    if (_selectedPage != null) RenderViewDetail(_selectedPage);
+                    lblStatus.Text = $"✅ {done}개 페이지 매뉴얼 생성 완료! 내용을 확인/수정한 뒤 📄 Export DOCX를 클릭하세요.";
+                    FindBtn("btnExport").Enabled = true;
+                }
+                catch (OperationCanceledException)
+                { lblStatus.Text = "⏹ 생성이 취소됐습니다."; }
+                catch (Exception ex)
+                { lblStatus.Text = $"⚠️ 생성 오류: {ex.Message}"; }
+                finally
+                {
+                    SetBusy(false, "");
+                    FindBtn("btnCancel").Enabled = false;
+                }
+                return;
+            }
+
+            // Legacy Document mode
+            if (_document == null) return;
+            SetBusy(true, "✨ LLM 매뉴얼 생성 중...");
 
             try
             {
@@ -726,9 +1359,35 @@ namespace AIAssistant
             }
         }
 
-        // ── Export ──
+        // ── Export (DOCX) ──
         private void BtnExport_Click(object sender, EventArgs e)
         {
+            if (cmbMode.SelectedIndex == 0 && _project != null)
+            {
+                using (var dlg = new SaveFileDialog
+                {
+                    Title = "매뉴얼 Word 내보내기",
+                    Filter = "Word Document (*.docx)|*.docx",
+                    FileName = $"{_project.AppName}_Manual_{DateTime.Now:yyyyMMdd}.docx"
+                })
+                {
+                    if (dlg.ShowDialog() != DialogResult.OK) return;
+                    try
+                    {
+                        ManualExporter.ExportProject(_project, dlg.FileName, _tempDir);
+                        lblStatus.Text = $"✅ DOCX 저장 완료: {Path.GetFileName(dlg.FileName)}";
+                        if (MessageBox.Show("Word 파일을 열겠습니까?", "완료",
+                            MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                            System.Diagnostics.Process.Start(dlg.FileName);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"내보내기 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                return;
+            }
+
             if (_document == null) return;
 
             // Before export, re-annotate screenshots with current callout state

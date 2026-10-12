@@ -30,6 +30,76 @@ namespace AIAssistant
     {
         // ─── Public API ──────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Export a view-centric ManualProject. Pages follow the UI XML menu tree:
+        ///   Heading (by depth) → annotated screenshot → 개요 → 컨트롤 표 → 사용 절차 → 주의사항
+        /// </summary>
+        public static void ExportProject(ManualProject project, string outputPath, string tempDir)
+        {
+            ExportDocx(BuildDocument(project, tempDir), outputPath);
+        }
+
+        public static ManualDocument BuildDocument(ManualProject project, string tempDir)
+        {
+            var doc = new ManualDocument
+            {
+                Title           = string.IsNullOrWhiteSpace(project.Title) ? "사용자 매뉴얼" : project.Title,
+                ApplicationName = project.AppName,
+                Subtitle        = $"작성일: {DateTime.Now:yyyy-MM-dd}" +
+                                  (string.IsNullOrEmpty(project.AppName) ? "" : $"  |  대상: {project.AppName}")
+            };
+            int order = 0;
+            foreach (var root in project.Roots)
+                AddPageBlocks(doc, root, tempDir, ref order);
+            return doc;
+        }
+
+        private static void AddPageBlocks(ManualDocument doc, ManualPage page, string tempDir, ref int order)
+        {
+            if (!page.IsIncluded) return;
+
+            doc.Blocks.Add(new ManualBlock
+            {
+                Type = ManualBlockType.Heading, Title = page.DisplayName,
+                HeadingLevel = Math.Min(3, page.Depth + 1), Order = order++
+            });
+
+            if (page.HasScreenshot)
+            {
+                string img = page.ScreenshotPath;
+                if (page.ShowCallouts && page.Callouts.Count > 0)
+                    img = ScreenCaptureEngine.AnnotateScreenshot(page.ScreenshotPath, page.CalloutItems(),
+                        page.WindowRect, tempDir, $"export_{page.Id}");
+                doc.Blocks.Add(new ManualBlock
+                {
+                    Type = ManualBlockType.Screenshot, Title = $"[그림] {page.PathText}",
+                    ScreenshotPath = img, Order = order++
+                });
+            }
+
+            if (!string.IsNullOrWhiteSpace(page.Summary))
+                doc.Blocks.Add(new ManualBlock { Type = ManualBlockType.Description, Title = "개요", Content = page.Summary, Order = order++ });
+
+            var rows = page.Controls.Where(c => !string.IsNullOrWhiteSpace(c.Name) || !string.IsNullOrWhiteSpace(c.Description)).ToList();
+            if (rows.Count > 0)
+            {
+                var table = new ManualBlock { Type = ManualBlockType.Table, Title = "화면 구성 요소", Order = order++ };
+                table.TableRows.Add(new[] { "번호", "항목", "설명" });
+                foreach (var c in rows)
+                    table.TableRows.Add(new[] { c.Callout.HasValue ? GetCircleNumber(c.Callout.Value) : "-", c.Name ?? "", c.Description ?? "" });
+                doc.Blocks.Add(table);
+            }
+
+            if (!string.IsNullOrWhiteSpace(page.Procedures))
+                doc.Blocks.Add(new ManualBlock { Type = ManualBlockType.Description, Title = "사용 절차", Content = page.Procedures, Order = order++ });
+
+            if (!string.IsNullOrWhiteSpace(page.Notes))
+                doc.Blocks.Add(new ManualBlock { Type = ManualBlockType.Warning, Title = "주의사항", Content = page.Notes, Order = order++ });
+
+            foreach (var child in page.Children)
+                AddPageBlocks(doc, child, tempDir, ref order);
+        }
+
         public static void ExportDocx(ManualDocument doc, string outputPath)
         {
             using (var pkg = Package.Open(outputPath, FileMode.Create, FileAccess.ReadWrite))
@@ -43,6 +113,7 @@ namespace AIAssistant
 
                 // Media images
                 var imageRels = new Dictionary<string, string>(); // elementId → rId
+                _imageSizes.Clear();
                 int imgIdx = 0;
 
                 var screenshotBlocks = doc.Blocks
@@ -60,6 +131,13 @@ namespace AIAssistant
 
                     using (var fs = File.OpenRead(sb.ScreenshotPath))
                         fs.CopyTo(imgPart.GetStream());
+
+                    try
+                    {
+                        using (var img = Image.FromFile(sb.ScreenshotPath))
+                            _imageSizes[rId] = new Size(img.Width, img.Height);
+                    }
+                    catch { }
 
                     imageRels[sb.Id] = rId;
                 }
@@ -107,7 +185,7 @@ namespace AIAssistant
 
             // Document title
             sb.Append(Para(doc.Title, "Heading1"));
-            sb.Append(Para($"작성일: {doc.CapturedAt}  |  캡처 모드: {(doc.Mode == CaptureMode.FullApp ? "전체 앱" : "현재 화면")}  |  대상: {doc.ApplicationName}", "Caption"));
+            sb.Append(Para(doc.Subtitle ?? $"작성일: {doc.CapturedAt}  |  캡처 모드: {(doc.Mode == CaptureMode.FullApp ? "전체 앱" : "현재 화면")}  |  대상: {doc.ApplicationName}", "Caption"));
             sb.Append(Para("", "Normal")); // spacer
 
             foreach (var block in doc.Blocks.Where(b => b.IsIncluded).OrderBy(b => b.Order))
@@ -115,17 +193,39 @@ namespace AIAssistant
                 switch (block.Type)
                 {
                     case ManualBlockType.Heading:
-                        string headStyle = block.Order == 0 ? "Heading1" : "Heading2";
+                        string headStyle = block.HeadingLevel > 0
+                            ? $"Heading{Math.Min(3, block.HeadingLevel)}"
+                            : (block.Order == 0 ? "Heading1" : "Heading2");
                         sb.Append(Para(block.Title, headStyle));
                         if (!string.IsNullOrEmpty(block.Content))
                             sb.Append(Para(block.Content, "Normal"));
                         break;
 
+                    case ManualBlockType.Description:
+                        if (!string.IsNullOrEmpty(block.Title))
+                            sb.Append(Para(block.Title, "SubHeading"));
+                        foreach (var line in (block.Content ?? "").Replace("\r", "").Split('\n'))
+                        {
+                            string t = line.Trim();
+                            if (t.Length == 0) continue;
+                            bool isGroup = t.StartsWith("[") && t.EndsWith("]");
+                            sb.Append(Para(isGroup ? t.Trim('[', ']') : t, isGroup ? "SubHeading" : "Normal"));
+                        }
+                        break;
+
+                    case ManualBlockType.Table:
+                        if (!string.IsNullOrEmpty(block.Title))
+                            sb.Append(Para(block.Title, "SubHeading"));
+                        if (block.TableRows != null && block.TableRows.Count > 0)
+                            sb.Append(BuildTable(block.TableRows));
+                        sb.Append(Para("", "Normal"));
+                        break;
+
                     case ManualBlockType.Screenshot:
                         if (imageRels.TryGetValue(block.Id, out string rId))
                         {
-                            sb.Append(Para(block.Title, "Caption"));
                             sb.Append(BuildImagePara(rId));
+                            sb.Append(Para(block.Title, "Caption"));
 
                             // Callout legend table
                             if (block.Callouts != null && block.Callouts.Count > 0)
@@ -163,7 +263,8 @@ namespace AIAssistant
                     case ManualBlockType.Warning:
                         sb.Append(Para($"⚠️ {block.Title}", "Warning"));
                         if (!string.IsNullOrEmpty(block.Content))
-                            sb.Append(Para(block.Content, "Normal"));
+                            foreach (var line in block.Content.Replace("\r", "").Split('\n').Where(l => l.Trim().Length > 0))
+                                sb.Append(Para(line.Trim(), "Normal"));
                         break;
 
                     case ManualBlockType.Procedure:
@@ -200,26 +301,81 @@ namespace AIAssistant
                    $"<w:r><w:t xml:space=\"preserve\">{num}. {escaped}</w:t></w:r></w:p>";
         }
 
+        private static readonly Dictionary<string, Size> _imageSizes = new Dictionary<string, Size>();
+        private static int _drawingId;
+
         private static string BuildImagePara(string rId)
         {
-            // 14400000 EMUs = ~15cm width (A4 content width ~12400000 → use 10800000 ≈ 11.25cm)
-            const long EMU_W = 10800000L;
-            const long EMU_H = 7200000L;
+            // A4 portrait with 1" margins → content width ≈ 15.9 cm. Keep aspect ratio, cap height ≈ 18 cm.
+            const long MAX_W = 5700000L;   // EMU (≈ 15.8 cm)
+            const long MAX_H = 6480000L;   // EMU (≈ 18 cm)
+            long EMU_W = MAX_W, EMU_H = 3600000L;
+            if (_imageSizes.TryGetValue(rId, out Size px) && px.Width > 0 && px.Height > 0)
+            {
+                double ratio = (double)px.Height / px.Width;
+                EMU_W = MAX_W;
+                EMU_H = (long)(MAX_W * ratio);
+                if (EMU_H > MAX_H) { EMU_H = MAX_H; EMU_W = (long)(MAX_H / ratio); }
+            }
+            int docPrId = ++_drawingId;
             return
-                "<w:p><w:r><w:rPr/><w:drawing>" +
+                "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:rPr/><w:drawing>" +
                 "<wp:inline xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">" +
                 $"<wp:extent cx=\"{EMU_W}\" cy=\"{EMU_H}\"/>" +
-                "<wp:docPr id=\"1\" name=\"Screenshot\"/>" +
+                $"<wp:docPr id=\"{docPrId}\" name=\"Screenshot {docPrId}\"/>" +
                 "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">" +
                 "<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
                 "<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
+                $"<pic:nvPicPr><pic:cNvPr id=\"{docPrId}\" name=\"img{docPrId}.png\"/><pic:cNvPicPr/></pic:nvPicPr>" +
                 "<pic:blipFill>" +
                 $"<a:blip r:embed=\"{rId}\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/>" +
                 "<a:stretch><a:fillRect/></a:stretch></pic:blipFill>" +
-                $"<pic:spPr><a:xfrm><a:ext cx=\"{EMU_W}\" cy=\"{EMU_H}\"/></a:xfrm>" +
+                $"<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{EMU_W}\" cy=\"{EMU_H}\"/></a:xfrm>" +
                 "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>" +
                 "</pic:spPr></pic:pic></a:graphicData></a:graphic>" +
                 "</wp:inline></w:drawing></w:r></w:p>";
+        }
+
+        private const string TableBorders =
+            "<w:tblBorders>" +
+            "<w:top w:val=\"single\" w:sz=\"4\" w:color=\"A6A6A6\"/><w:left w:val=\"single\" w:sz=\"4\" w:color=\"A6A6A6\"/>" +
+            "<w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"A6A6A6\"/><w:right w:val=\"single\" w:sz=\"4\" w:color=\"A6A6A6\"/>" +
+            "<w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"A6A6A6\"/><w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"A6A6A6\"/>" +
+            "</w:tblBorders>";
+
+        /// <summary>Generic table; first row is a shaded header. Column widths tuned for (번호, 항목, 설명).</summary>
+        private static string BuildTable(List<string[]> rows)
+        {
+            int cols = rows.Max(r => r.Length);
+            int[] widths = cols == 3 ? new[] { 700, 2300, 6000 } : Enumerable.Repeat(9000 / Math.Max(1, cols), cols).ToArray();
+
+            var sb = new StringBuilder();
+            sb.Append($"<w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"pct\"/>{TableBorders}</w:tblPr><w:tblGrid>");
+            foreach (var w in widths) sb.Append($"<w:gridCol w:w=\"{w}\"/>");
+            sb.Append("</w:tblGrid>");
+            for (int r = 0; r < rows.Count; r++)
+            {
+                sb.Append("<w:tr>");
+                for (int c = 0; c < cols; c++)
+                {
+                    string text = c < rows[r].Length ? rows[r][c] ?? "" : "";
+                    bool header = r == 0;
+                    sb.Append($"<w:tc><w:tcPr><w:tcW w:w=\"{widths[c]}\" w:type=\"dxa\"/>");
+                    if (header) sb.Append("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"DCE6F2\"/>");
+                    sb.Append("</w:tcPr>");
+                    // Multi-line cell text → one paragraph per line
+                    foreach (var line in text.Replace("\r", "").Split('\n'))
+                    {
+                        string rPr = header ? "<w:rPr><w:b/></w:rPr>" : "";
+                        sb.Append($"<w:p><w:pPr><w:spacing w:after=\"0\"/>{(c == 0 ? "<w:jc w:val=\"center\"/>" : "")}</w:pPr>" +
+                                  $"<w:r>{rPr}<w:t xml:space=\"preserve\">{XmlEscape(line)}</w:t></w:r></w:p>");
+                    }
+                    sb.Append("</w:tc>");
+                }
+                sb.Append("</w:tr>");
+            }
+            sb.Append("</w:tbl>");
+            return sb.ToString();
         }
 
         private static string BuildCalloutTable(List<CalloutItem> callouts)
@@ -283,6 +439,9 @@ namespace AIAssistant
 <w:style w:type=""paragraph"" w:styleId=""Warning""><w:name w:val=""Warning""/>
   <w:pPr><w:pBdr><w:left w:val=""single"" w:sz=""6"" w:color=""FF0000""/></w:pBdr><w:ind w:left=""360""/></w:pPr>
   <w:rPr><w:b/><w:color w:val=""C00000""/></w:rPr></w:style>
+<w:style w:type=""paragraph"" w:styleId=""SubHeading""><w:name w:val=""SubHeading""/>
+  <w:pPr><w:spacing w:before=""160"" w:after=""60""/></w:pPr>
+  <w:rPr><w:b/><w:sz w:val=""22""/><w:color w:val=""404040""/></w:rPr></w:style>
 </w:styles>";
 
         // ─── Package helpers ───────────────────────────────────────────────────

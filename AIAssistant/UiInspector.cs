@@ -58,6 +58,27 @@ namespace AIAssistant
         }
 
         /// <summary>
+        /// View-centric capture: screenshot + UI element walk, WITHOUT automatic callouts.
+        /// Callout selection is done afterwards by CalloutPlanner using View source context.
+        /// </summary>
+        public static WindowSnapshot CaptureWindowElements(IntPtr hwnd, string tempDir, string tag)
+        {
+            var root = SafeFromHandle(hwnd);
+            if (root == null) return null;
+
+            var snapshot = new WindowSnapshot
+            {
+                Handle      = hwnd,
+                WindowTitle = SafeGet(root, AutomationElement.NameProperty, ""),
+                WindowRect  = GetWindowRect(root)
+            };
+            snapshot.ScreenshotPath = ScreenCaptureEngine.CaptureWindow(hwnd, tempDir, tag);
+            snapshot.Elements       = WalkControlView(root, null, 0);
+            foreach (var el in snapshot.Elements) el.WindowTitle = snapshot.WindowTitle;
+            return snapshot;
+        }
+
+        /// <summary>
         /// CurrentScreen mode: collect UI elements from the given window handle (single pass).
         /// </summary>
         public static WindowSnapshot CaptureCurrentScreen(IntPtr hwnd, string tempDir)
@@ -267,7 +288,7 @@ namespace AIAssistant
             AutomationElement root, string parentId, int depth)
         {
             var results = new List<UiElementInfo>();
-            if (root == null || depth > 12) return results;
+            if (root == null || depth > 30) return results;
 
             var walker = TreeWalker.ControlViewWalker;
             AutomationElement child;
@@ -286,6 +307,12 @@ namespace AIAssistant
                         var descendants = WalkControlView(child, info.UniqueId, depth + 1);
                         results.AddRange(descendants);
                     }
+                    else if (ShouldDescend(child))
+                    {
+                        // Suppressed container (Custom/Pane/Group — e.g. a Prism region UserControl):
+                        // skip the container itself but keep walking its visible children.
+                        results.AddRange(WalkControlView(child, parentId, depth + 1));
+                    }
                 }
                 catch { /* skip corrupt elements */ }
 
@@ -293,6 +320,16 @@ namespace AIAssistant
                 catch { break; }
             }
             return results;
+        }
+
+        private static bool ShouldDescend(AutomationElement el)
+        {
+            try
+            {
+                var cur = el.Current;
+                return !cur.IsOffscreen && cur.BoundingRectangle.Width >= 2 && cur.BoundingRectangle.Height >= 2;
+            }
+            catch { return false; }
         }
 
         private static UiElementInfo BuildElementInfo(AutomationElement el, string parentId, int depth)
@@ -316,9 +353,7 @@ namespace AIAssistant
                 Name          = cur.Name ?? "",
                 AutomationId  = cur.AutomationId ?? "",
                 ClassName     = cur.ClassName ?? "",
-                ControlType   = cur.ControlType.ProgrammaticName
-                                    .Replace("ControlType.", "")
-                                    .ToLowerInvariant(),
+                ControlType   = ToCamel(cur.ControlType.ProgrammaticName.Replace("ControlType.", "")),
                 IsEnabled     = cur.IsEnabled,
                 IsOffscreen   = cur.IsOffscreen,
                 HasKeyboardFocus = cur.HasKeyboardFocus,
@@ -416,7 +451,11 @@ namespace AIAssistant
 
         // ─── Helpers ──────────────────────────────────────────────────────────
 
-        private static List<IntPtr> GetAllWindowsForProcess(int pid)
+        /// <summary>"ComboBox" → "comboBox" (matches the names used by IsInteractive / scoring).</summary>
+        private static string ToCamel(string s) =>
+            string.IsNullOrEmpty(s) ? "" : char.ToLowerInvariant(s[0]) + s.Substring(1);
+
+        internal static List<IntPtr> GetAllWindowsForProcess(int pid)
         {
             var handles = new List<IntPtr>();
             // Use EnumWindows via user32
@@ -430,13 +469,13 @@ namespace AIAssistant
             return handles;
         }
 
-        private static int GetProcessId(IntPtr hwnd)
+        internal static int GetProcessId(IntPtr hwnd)
         {
             NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
             return (int)pid;
         }
 
-        private static AutomationElement SafeFromHandle(IntPtr hwnd)
+        internal static AutomationElement SafeFromHandle(IntPtr hwnd)
         {
             try { return AutomationElement.FromHandle(hwnd); }
             catch { return null; }
@@ -514,6 +553,25 @@ namespace AIAssistant
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern uint GetDpiForWindow(IntPtr hwnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hwnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool IsIconic(IntPtr hwnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool SetCursorPos(int x, int y);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+
+        public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
+        public const int  SW_RESTORE = 9;
 
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }

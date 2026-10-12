@@ -85,6 +85,11 @@
     <Compile Include="SamTodoToolWindow.cs" />
     <Compile Include="OpenSamTodoCommand.cs" />
     <Compile Include="ManualModels.cs" />
+    <Compile Include="ManualProject.cs" />
+    <Compile Include="UiMenuXmlParser.cs" />
+    <Compile Include="PrismViewResolver.cs" />
+    <Compile Include="ViewNavigator.cs" />
+    <Compile Include="ViewManualGenerator.cs" />
     <Compile Include="UiInspector.cs" />
     <Compile Include="ScreenCaptureEngine.cs" />
     <Compile Include="SourceAnalyzer.cs" />

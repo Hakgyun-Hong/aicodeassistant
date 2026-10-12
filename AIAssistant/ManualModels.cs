@@ -164,6 +164,12 @@ namespace AIAssistant
         // Window/tab context
         public string WindowName             { get; set; }
         public string TabContext             { get; set; }
+
+        // Heading level for Heading blocks (1–3). 0 = legacy behavior (Order 0 → H1, else H2).
+        public int HeadingLevel              { get; set; }
+
+        // Table blocks: first row = header
+        public List<string[]> TableRows      { get; set; } = new List<string[]>();
     }
 
     public sealed class CalloutItem
@@ -187,6 +193,7 @@ namespace AIAssistant
         public string ApplicationName { get; set; } = "";
         public string CapturedAt      { get; set; } = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm");
         public CaptureMode Mode       { get; set; }
+        public string Subtitle        { get; set; }   // optional caption under the title (overrides default)
 
         // Ordered list of all blocks
         public List<ManualBlock> Blocks { get; set; } = new List<ManualBlock>();
