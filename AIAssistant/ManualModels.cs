@@ -170,6 +170,9 @@ namespace AIAssistant
 
         // Table blocks: first row = header
         public List<string[]> TableRows      { get; set; } = new List<string[]>();
+
+        // Page break before block
+        public bool PageBreakBefore          { get; set; }
     }
 
     public sealed class CalloutItem

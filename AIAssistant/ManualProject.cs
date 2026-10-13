@@ -83,6 +83,7 @@ namespace AIAssistant
         [DataMember] public int?   Callout     { get; set; }
         [DataMember] public string Name        { get; set; } = "";
         [DataMember] public string Description { get; set; } = "";
+        [DataMember] public string ElementId   { get; set; }
     }
 
     [DataContract]
@@ -148,6 +149,103 @@ namespace AIAssistant
         public string PathText => NavPath.Count > 0 ? string.Join(" › ", NavPath) : DisplayName;
 
         public List<CalloutItem> CalloutItems() => Callouts.Select(c => c.ToCalloutItem()).ToList();
+
+        /// <summary>
+        /// Synchronizes PageCallout list with current ControlDesc list:
+        /// - Numbers in Callouts are updated to match Controls.
+        /// - Labels in Callouts are updated to match Control names.
+        /// - Bounding boxes are tracked by ElementId, Label, or Number without losing positions.
+        /// - Any Callouts whose control has been removed are cleaned up.
+        /// - New controls with numbers are correlated with page.Elements if available.
+        /// </summary>
+        public void SyncCalloutsFromControls()
+        {
+            if (Controls == null) Controls = new List<ControlDesc>();
+            if (Callouts == null) Callouts = new List<PageCallout>();
+
+            var calloutByEl = Callouts.Where(c => !string.IsNullOrEmpty(c.ElementId))
+                                      .ToDictionary(c => c.ElementId, c => c);
+
+            var updatedCallouts = new List<PageCallout>();
+            var usedCallouts = new HashSet<PageCallout>();
+
+            foreach (var ctrl in Controls)
+            {
+                if (!ctrl.Callout.HasValue || ctrl.Callout.Value <= 0) continue;
+                int newNum = ctrl.Callout.Value;
+
+                // 1. Try finding callout by ElementId
+                PageCallout target = null;
+                if (!string.IsNullOrEmpty(ctrl.ElementId) && calloutByEl.TryGetValue(ctrl.ElementId, out var byEl))
+                {
+                    target = byEl;
+                }
+
+                // 2. Try finding callout by Label matching ctrl.Name
+                if (target == null && !string.IsNullOrEmpty(ctrl.Name))
+                {
+                    target = Callouts.FirstOrDefault(c => !usedCallouts.Contains(c) &&
+                        string.Equals(c.Label, ctrl.Name, StringComparison.OrdinalIgnoreCase));
+                }
+
+                // 3. Try finding callout by existing Number
+                if (target == null)
+                {
+                    target = Callouts.FirstOrDefault(c => !usedCallouts.Contains(c) && c.Number == newNum);
+                }
+
+                if (target != null)
+                {
+                    usedCallouts.Add(target);
+                    target.Number = newNum;
+                    if (!string.IsNullOrEmpty(ctrl.Name)) target.Label = ctrl.Name;
+                    if (!string.IsNullOrEmpty(target.ElementId)) ctrl.ElementId = target.ElementId;
+                    updatedCallouts.Add(target);
+                }
+                else
+                {
+                    // If no callout matched, find element in page.Elements
+                    var el = Elements?.FirstOrDefault(e => !string.IsNullOrEmpty(ctrl.Name) &&
+                        (string.Equals(e.Name, ctrl.Name, StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(e.AutomationId, ctrl.Name, StringComparison.OrdinalIgnoreCase)));
+
+                    if (el != null)
+                    {
+                        ctrl.ElementId = el.Id;
+                        var newCo = new PageCallout
+                        {
+                            Number = newNum,
+                            ElementId = el.Id,
+                            Label = ctrl.Name,
+                            X = el.X, Y = el.Y, W = el.W, H = el.H
+                        };
+                        usedCallouts.Add(newCo);
+                        updatedCallouts.Add(newCo);
+                    }
+                }
+            }
+
+            Callouts = updatedCallouts;
+        }
+
+        /// <summary>
+        /// Renumbers controls and callouts sequentially (1, 2, 3...) in reading/table order.
+        /// </summary>
+        public void RenumberControlsAndCallouts()
+        {
+            if (Controls == null || Controls.Count == 0) return;
+            int seq = 1;
+
+            foreach (var ctrl in Controls)
+            {
+                if (!string.IsNullOrWhiteSpace(ctrl.Name) || ctrl.Callout.HasValue)
+                {
+                    ctrl.Callout = seq++;
+                }
+            }
+
+            SyncCalloutsFromControls();
+        }
 
         [OnDeserialized]
         private void OnDeserialized(StreamingContext ctx)

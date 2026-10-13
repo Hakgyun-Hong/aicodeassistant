@@ -169,17 +169,25 @@ namespace AIAssistant
 
             var controls = (dto.Controls ?? new List<ControlDto>())
                 .Where(c => c != null && !string.IsNullOrWhiteSpace(c.Name + c.Description))
-                .Select(c => new ControlDesc
+                .Select(c =>
                 {
-                    Callout     = c.Callout.HasValue && page.Callouts.Any(p => p.Number == c.Callout.Value) ? c.Callout : null,
-                    Name        = (c.Name ?? "").Trim(),
-                    Description = (c.Description ?? "").Trim()
+                    var matchedCo = c.Callout.HasValue ? page.Callouts.FirstOrDefault(p => p.Number == c.Callout.Value) : null;
+                    if (matchedCo == null && !string.IsNullOrEmpty(c.Name))
+                        matchedCo = page.Callouts.FirstOrDefault(p => string.Equals(p.Label, c.Name, StringComparison.OrdinalIgnoreCase));
+
+                    return new ControlDesc
+                    {
+                        Callout     = matchedCo != null ? matchedCo.Number : (c.Callout.HasValue && page.Callouts.Any(p => p.Number == c.Callout.Value) ? c.Callout : null),
+                        Name        = (c.Name ?? "").Trim(),
+                        Description = (c.Description ?? "").Trim(),
+                        ElementId   = matchedCo?.ElementId
+                    };
                 }).ToList();
 
             // Every callout should have a row (even if the LLM skipped it) so the user sees what's missing.
             foreach (var co in page.Callouts)
                 if (!controls.Any(c => c.Callout == co.Number))
-                    controls.Add(new ControlDesc { Callout = co.Number, Name = co.Label, Description = "" });
+                    controls.Add(new ControlDesc { Callout = co.Number, Name = co.Label, Description = "", ElementId = co.ElementId });
 
             page.Controls = controls.OrderBy(c => c.Callout ?? int.MaxValue).ToList();
 

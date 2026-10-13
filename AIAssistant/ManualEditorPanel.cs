@@ -1137,17 +1137,35 @@ namespace AIAssistant
             pnlViewDetail.Controls.Add(txtSum);
             y += txtSum.Height + 14;
 
-            // Controls Grid (컨트롤 설명 목록)
-            var lblCtrl = new Label { Text = "🎛 컨트롤 설명 (Controls)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(12, y), AutoSize = true };
-            pnlViewDetail.Controls.Add(lblCtrl);
-            y += 24;
+            // Controls Grid (컨트롤 설명 목록) & Tools Toolbar
+            var pnlCtrlHeader = new Panel
+            {
+                Location = new Point(12, y), Width = w, Height = 28, BackColor = Color.Transparent
+            };
+            var lblCtrl = new Label { Text = "🎛 컨트롤 설명 (Controls)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(0, 4), AutoSize = true };
+            pnlCtrlHeader.Controls.Add(lblCtrl);
+
+            var btnAddCtrl = CreateSmallBtn("➕ 항목 추가", 80, 24, CLR_CARD_BORDER);
+            btnAddCtrl.Location = new Point(w - 290, 2);
+            pnlCtrlHeader.Controls.Add(btnAddCtrl);
+
+            var btnRenumber = CreateSmallBtn("🔢 번호 자동정렬", 100, 24, CLR_CARD_BORDER);
+            btnRenumber.Location = new Point(w - 205, 2);
+            pnlCtrlHeader.Controls.Add(btnRenumber);
+
+            var btnDelCtrl = CreateSmallBtn("🗑 선택삭제", 80, 24, CLR_DANGER);
+            btnDelCtrl.Location = new Point(w - 100, 2);
+            pnlCtrlHeader.Controls.Add(btnDelCtrl);
+
+            pnlViewDetail.Controls.Add(pnlCtrlHeader);
+            y += pnlCtrlHeader.Height + 6;
 
             var grid = new DataGridView
             {
                 Location = new Point(12, y), Width = w, Height = 170,
                 BackgroundColor = CLR_CARD, ForeColor = CLR_TEXT,
                 GridColor = CLR_CARD_BORDER, BorderStyle = BorderStyle.None,
-                RowHeadersVisible = false, AllowUserToAddRows = true,
+                RowHeadersVisible = false, AllowUserToAddRows = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 EnableHeadersVisualStyles = false
             };
@@ -1158,12 +1176,57 @@ namespace AIAssistant
             grid.DefaultCellStyle.SelectionBackColor = CLR_CARD_HOVER;
             grid.DefaultCellStyle.SelectionForeColor = Color.White;
 
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "번호", DataPropertyName = "Callout", Width = 50, FillWeight = 15 });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "번호", DataPropertyName = "Callout", Width = 55, FillWeight = 15 });
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "컨트롤 이름", DataPropertyName = "Name", Width = 150, FillWeight = 35 });
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "기능 / 사용 조건", DataPropertyName = "Description", FillWeight = 50 });
 
             var bindingList = new System.ComponentModel.BindingList<ControlDesc>(page.Controls);
             grid.DataSource = bindingList;
+
+            // Real-time synchronization: when user edits Callout number, Name, or Description:
+            Action syncAndRefresh = () =>
+            {
+                page.SyncCalloutsFromControls();
+                refreshPic();
+            };
+
+            grid.CellEndEdit += (s, e) => syncAndRefresh();
+            grid.CellValueChanged += (s, e) => syncAndRefresh();
+            grid.RowsRemoved += (s, e) => syncAndRefresh();
+            grid.DataError += (s, e) => { e.ThrowException = false; e.Cancel = false; };
+
+            btnAddCtrl.Click += (s, e) =>
+            {
+                int nextNum = page.Controls.Count > 0
+                    ? (page.Controls.Max(c => c.Callout ?? 0) + 1)
+                    : 1;
+                bindingList.Add(new ControlDesc { Callout = nextNum, Name = "새 컨트롤", Description = "" });
+                syncAndRefresh();
+            };
+
+            btnRenumber.Click += (s, e) =>
+            {
+                page.RenumberControlsAndCallouts();
+                bindingList.ResetBindings();
+                refreshPic();
+            };
+
+            btnDelCtrl.Click += (s, e) =>
+            {
+                if (grid.SelectedCells.Count > 0)
+                {
+                    var selectedRowIndices = grid.SelectedCells.Cast<DataGridViewCell>()
+                        .Select(c => c.RowIndex).Distinct().OrderByDescending(idx => idx).ToList();
+
+                    foreach (var idx in selectedRowIndices)
+                    {
+                        if (idx >= 0 && idx < bindingList.Count)
+                            bindingList.RemoveAt(idx);
+                    }
+                    syncAndRefresh();
+                }
+            };
+
             pnlViewDetail.Controls.Add(grid);
             y += grid.Height + 14;
 
