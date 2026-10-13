@@ -91,6 +91,7 @@
     <Compile Include="ViewNavigator.cs" />
     <Compile Include="ViewManualGenerator.cs" />
     <Compile Include="UiInspector.cs" />
+    <Compile Include="UiaTreeInspectorDialog.cs" />
     <Compile Include="ScreenCaptureEngine.cs" />
     <Compile Include="SourceAnalyzer.cs" />
     <Compile Include="UiSourceMapper.cs" />

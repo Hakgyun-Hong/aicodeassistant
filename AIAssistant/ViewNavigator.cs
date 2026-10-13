@@ -101,6 +101,7 @@ namespace AIAssistant
         private static AutomationElement FindTarget(int pid, string name)
         {
             if (string.IsNullOrWhiteSpace(name)) return null;
+            name = name.Trim();
             AutomationElement best = null;
             int bestScore = int.MinValue;
 
@@ -109,22 +110,81 @@ namespace AIAssistant
                 var root = UiInspector.SafeFromHandle(hwnd);
                 if (root == null) continue;
 
-                AutomationElementCollection found;
-                try
-                {
-                    found = root.FindAll(TreeScope.Descendants,
-                        new PropertyCondition(AutomationElement.NameProperty, name.Trim()));
-                }
-                catch { continue; }
+                // 1. Exact Name match
+                var found = SafeFindAll(root, new PropertyCondition(AutomationElement.NameProperty, name));
+                EvaluateMatches(found, ref best, ref bestScore, 100);
 
-                foreach (AutomationElement el in found)
+                // 2. Exact AutomationId match
+                if (bestScore < 80)
                 {
-                    var target = ClimbToActionable(el);
-                    int score = Score(target);
-                    if (score > bestScore) { bestScore = score; best = target; }
+                    var foundId = SafeFindAll(root, new PropertyCondition(AutomationElement.AutomationIdProperty, name));
+                    EvaluateMatches(foundId, ref best, ref bestScore, 90);
+                }
+
+                // 3. Fallback: fuzzy/case-insensitive walk
+                if (bestScore < 60)
+                {
+                    var walker = TreeWalker.ControlViewWalker;
+                    WalkAndMatch(root, name, ref best, ref bestScore, walker, 0);
                 }
             }
             return bestScore > -50 ? best : null;
+        }
+
+        private static AutomationElementCollection SafeFindAll(AutomationElement root, Condition cond)
+        {
+            try { return root.FindAll(TreeScope.Descendants, cond); }
+            catch { return null; }
+        }
+
+        private static void EvaluateMatches(AutomationElementCollection coll, ref AutomationElement best, ref int bestScore, int bonus)
+        {
+            if (coll == null) return;
+            foreach (AutomationElement el in coll)
+            {
+                var target = ClimbToActionable(el);
+                int score = Score(target) + bonus;
+                if (score > bestScore) { bestScore = score; best = target; }
+            }
+        }
+
+        private static void WalkAndMatch(AutomationElement el, string query, ref AutomationElement best, ref int bestScore, TreeWalker walker, int depth)
+        {
+            if (el == null || depth > 15) return;
+            try
+            {
+                var cur = el.Current;
+                if (!cur.IsOffscreen)
+                {
+                    string n = cur.Name ?? "";
+                    string aid = cur.AutomationId ?? "";
+                    int matchBonus = 0;
+
+                    if (string.Equals(n, query, StringComparison.OrdinalIgnoreCase)) matchBonus = 80;
+                    else if (string.Equals(aid, query, StringComparison.OrdinalIgnoreCase)) matchBonus = 70;
+                    else if (n.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0) matchBonus = 40;
+                    else if (aid.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0) matchBonus = 35;
+
+                    if (matchBonus > 0)
+                    {
+                        var target = ClimbToActionable(el);
+                        int s = Score(target) + matchBonus;
+                        if (s > bestScore) { bestScore = s; best = target; }
+                    }
+                }
+            }
+            catch { }
+
+            AutomationElement child;
+            try { child = walker.GetFirstChild(el); }
+            catch { return; }
+
+            while (child != null)
+            {
+                WalkAndMatch(child, query, ref best, ref bestScore, walker, depth + 1);
+                try { child = walker.GetNextSibling(child); }
+                catch { break; }
+            }
         }
 
         /// <summary>Text inside a templated button → climb to the clickable ancestor (max 3 levels).</summary>

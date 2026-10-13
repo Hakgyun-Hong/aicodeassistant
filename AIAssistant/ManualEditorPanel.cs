@@ -72,8 +72,7 @@ namespace AIAssistant
         private ViewManualGenerator     _viewGenerator;
         private ManualPage              _selectedPage;
 
-        private List<(int Pid, string Name, string Title, IntPtr Hwnd)> _processes
-            = new List<(int, string, string, IntPtr)>();
+        private List<WpfProcessInfo> _processes = new List<WpfProcessInfo>();
 
         // ─── Constructor ──────────────────────────────────────────────────
 
@@ -152,6 +151,14 @@ namespace AIAssistant
             btnLoadProj.Tag = "btnLoadProj";
             btnLoadProj.Click += BtnLoadProj_Click;
             pnlToolbar.Controls.Add(btnLoadProj);
+
+            AddSpacer(pnlToolbar, 10);
+
+            // UIA Inspector Button
+            var btnInspectUia = CreateAccentBtn("🔍 UIA 트리 검토", Color.FromArgb(50, 110, 110));
+            btnInspectUia.Tag = "btnInspectUia";
+            btnInspectUia.Click += BtnInspectUia_Click;
+            pnlToolbar.Controls.Add(btnInspectUia);
 
             AddSpacer(pnlToolbar, 10);
 
@@ -788,6 +795,7 @@ namespace AIAssistant
                     }
 
                     string solDir = GetSolutionDirectory() ?? Path.GetDirectoryName(dlg.FileName);
+                    var projectDirs = GetSolutionProjectDirectories();
                     _project = new ManualProject
                     {
                         AppName    = Path.GetFileNameWithoutExtension(dlg.FileName),
@@ -797,8 +805,8 @@ namespace AIAssistant
                         Roots      = roots
                     };
 
-                    _viewResolver = new PrismViewResolver(solDir);
-                    SetBusy(true, "🔍 Prism View/ViewModel 소스 매핑 중...");
+                    _viewResolver = new PrismViewResolver(solDir, projectDirs);
+                    SetBusy(true, "🔍 Prism View/ViewModel 소스 매핑 중 (솔루션 및 프로젝트 탐색)...");
 
                     Task.Run(() =>
                     {
@@ -809,7 +817,8 @@ namespace AIAssistant
                     {
                         SetBusy(false, "");
                         PopulatePagesTree();
-                        lblStatus.Text = $"✅ XML 로드 완료: {_project.AllPages().Count()}개 메뉴 (Prism View 매핑 완료)";
+                        string solName = Path.GetFileName(solDir ?? "");
+                        lblStatus.Text = $"✅ XML 로드 완료: {_project.AllPages().Count()}개 메뉴 (솔루션: {solName}, {_viewResolver.XamlCount}개 XAML 인덱싱)";
                         FindBtn("btnGenerate").Enabled = true;
                         FindBtn("btnExport").Enabled   = true;
                     }, TaskScheduler.FromCurrentSynchronizationContext());
@@ -865,7 +874,8 @@ namespace AIAssistant
                 {
                     _project = ManualProjectStore.Load(dlg.FileName);
                     string solDir = _project.SourceRoot ?? GetSolutionDirectory();
-                    _viewResolver = new PrismViewResolver(solDir);
+                    var projectDirs = GetSolutionProjectDirectories();
+                    _viewResolver = new PrismViewResolver(solDir, projectDirs);
                     _viewResolver.BuildIndex();
 
                     PopulatePagesTree();
@@ -927,9 +937,10 @@ namespace AIAssistant
             int y = 12;
 
             // Header Box
+            int headH = 138;
             var pnlHead = new Panel
             {
-                Location = new Point(12, y), Width = w, Height = 95,
+                Location = new Point(12, y), Width = w, Height = headH,
                 BackColor = CLR_CARD
             };
             pnlHead.Paint += (s, e) => PaintCardBorder(e.Graphics, pnlHead, CLR_ACCENT, 1);
@@ -942,6 +953,22 @@ namespace AIAssistant
             };
             pnlHead.Controls.Add(lblTitle);
 
+            // Action Buttons for this Page
+            var btnNavCap = CreateAccentBtn("🎯 Navigate & 📸 Capture", CLR_ACCENT);
+            btnNavCap.Location = new Point(w - 490, 8);
+            btnNavCap.Click += async (s, e) => await CapturePageAsync(page);
+            pnlHead.Controls.Add(btnNavCap);
+
+            var btnGenThis = CreateAccentBtn("✨ Generate (LLM)", CLR_ACCENT2);
+            btnGenThis.Location = new Point(w - 300, 8);
+            btnGenThis.Click += async (s, e) => await GeneratePageAsync(page);
+            pnlHead.Controls.Add(btnGenThis);
+
+            var btnInspectThis = CreateAccentBtn("🔍 UIA 트리 검토", Color.FromArgb(50, 110, 110));
+            btnInspectThis.Location = new Point(w - 150, 8);
+            btnInspectThis.Click += (s, e) => OpenInspectorForPage(page);
+            pnlHead.Controls.Add(btnInspectThis);
+
             var lblView = new Label
             {
                 Text = $"View: {page.ViewName ?? "(없음)"}  |  ViewModel: {page.ViewModelTypeName ?? "(미지정)"}",
@@ -950,24 +977,85 @@ namespace AIAssistant
             };
             pnlHead.Controls.Add(lblView);
 
-            var lblSrc = new Label
+            // Row 3: XAML source path & Open in VS / Browse
+            int yRow3 = 66;
+            bool hasXaml = !string.IsNullOrEmpty(page.ViewXamlPath) && File.Exists(page.ViewXamlPath);
+            var lblXaml = new Label
             {
-                Text = $"XAML: {Trunc(page.ViewXamlPath ?? "미발견", 55)}  /  VM: {Trunc(page.ViewModelPath ?? "미발견", 55)}",
-                Font = FNT_SMALL, ForeColor = CLR_TEXT_DIM, AutoSize = true,
-                Location = new Point(14, 58), BackColor = CLR_CARD
+                Text = $"XAML: {Trunc(page.ViewXamlPath ?? "미발견 (우측 버튼으로 지정 가능)", 52)}",
+                Font = FNT_SMALL,
+                ForeColor = hasXaml ? Color.FromArgb(78, 201, 176) : CLR_TEXT_DIM,
+                AutoSize = true,
+                Location = new Point(14, yRow3 + 3),
+                BackColor = CLR_CARD
             };
-            pnlHead.Controls.Add(lblSrc);
+            pnlHead.Controls.Add(lblXaml);
 
-            // Action Buttons for this Page
-            var btnNavCap = CreateAccentBtn("🎯 Navigate & 📸 Capture", CLR_ACCENT);
-            btnNavCap.Location = new Point(w - 380, 10);
-            btnNavCap.Click += async (s, e) => await CapturePageAsync(page);
-            pnlHead.Controls.Add(btnNavCap);
+            var btnOpenXaml = CreateSmallBtn("📂 VS 열기", 80, 22, CLR_CARD_BORDER);
+            btnOpenXaml.Location = new Point(w - 175, yRow3);
+            btnOpenXaml.Enabled = hasXaml;
+            btnOpenXaml.Click += (s, e) => OpenInVisualStudio(page.ViewXamlPath);
+            pnlHead.Controls.Add(btnOpenXaml);
 
-            var btnGenThis = CreateAccentBtn("✨ Generate (LLM)", CLR_ACCENT2);
-            btnGenThis.Location = new Point(w - 180, 10);
-            btnGenThis.Click += async (s, e) => await GeneratePageAsync(page);
-            pnlHead.Controls.Add(btnGenThis);
+            var btnBrowseXaml = CreateSmallBtn("🔍 찾기...", 75, 22, CLR_CARD_BORDER);
+            btnBrowseXaml.Location = new Point(w - 90, yRow3);
+            btnBrowseXaml.Click += (s, e) =>
+            {
+                using (var dlg = new OpenFileDialog
+                {
+                    Filter = "XAML Files (*.xaml)|*.xaml|All Files (*.*)|*.*",
+                    InitialDirectory = _project?.SourceRoot ?? GetSolutionDirectory()
+                })
+                {
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                    {
+                        page.ViewXamlPath = dlg.FileName;
+                        page.SourceLocked = true;
+                        RenderViewDetail(page);
+                    }
+                }
+            };
+            pnlHead.Controls.Add(btnBrowseXaml);
+
+            // Row 4: ViewModel source path & Open in VS / Browse
+            int yRow4 = 96;
+            bool hasVm = !string.IsNullOrEmpty(page.ViewModelPath) && File.Exists(page.ViewModelPath);
+            var lblVm = new Label
+            {
+                Text = $"VM:   {Trunc(page.ViewModelPath ?? "미발견 (우측 버튼으로 지정 가능)", 52)}",
+                Font = FNT_SMALL,
+                ForeColor = hasVm ? Color.FromArgb(78, 201, 176) : CLR_TEXT_DIM,
+                AutoSize = true,
+                Location = new Point(14, yRow4 + 3),
+                BackColor = CLR_CARD
+            };
+            pnlHead.Controls.Add(lblVm);
+
+            var btnOpenVm = CreateSmallBtn("📂 VS 열기", 80, 22, CLR_CARD_BORDER);
+            btnOpenVm.Location = new Point(w - 175, yRow4);
+            btnOpenVm.Enabled = hasVm;
+            btnOpenVm.Click += (s, e) => OpenInVisualStudio(page.ViewModelPath);
+            pnlHead.Controls.Add(btnOpenVm);
+
+            var btnBrowseVm = CreateSmallBtn("🔍 찾기...", 75, 22, CLR_CARD_BORDER);
+            btnBrowseVm.Location = new Point(w - 90, yRow4);
+            btnBrowseVm.Click += (s, e) =>
+            {
+                using (var dlg = new OpenFileDialog
+                {
+                    Filter = "C# Source Files (*.cs)|*.cs|All Files (*.*)|*.*",
+                    InitialDirectory = _project?.SourceRoot ?? GetSolutionDirectory()
+                })
+                {
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                    {
+                        page.ViewModelPath = dlg.FileName;
+                        page.SourceLocked = true;
+                        RenderViewDetail(page);
+                    }
+                }
+            };
+            pnlHead.Controls.Add(btnBrowseVm);
 
             pnlViewDetail.Controls.Add(pnlHead);
             y += pnlHead.Height + 14;
@@ -988,6 +1076,11 @@ namespace AIAssistant
                 Location = new Point(12, 8), BackColor = CLR_CARD
             };
             pnlImg.Controls.Add(lblImgHead);
+
+            var btnInspectUiaImg = CreateSmallBtn("🔍 UIA 트리 검토", 115, 22, CLR_CARD_BORDER);
+            btnInspectUiaImg.Location = new Point(w - 270, 6);
+            btnInspectUiaImg.Click += (s, e) => OpenInspectorForPage(page);
+            pnlImg.Controls.Add(btnInspectUiaImg);
 
             var chkShowCallouts = new CheckBox
             {
@@ -1552,11 +1645,101 @@ namespace AIAssistant
         {
             try
             {
-                var dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
+                var dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE ?? Helper.DteInstance;
                 string sol = dte?.Solution?.FullName;
                 return string.IsNullOrEmpty(sol) ? null : Path.GetDirectoryName(sol);
             }
             catch { return null; }
+        }
+
+        private List<string> GetSolutionProjectDirectories()
+        {
+            var list = new List<string>();
+            try
+            {
+                var dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE ?? Helper.DteInstance;
+                if (dte?.Solution != null && dte.Solution.IsOpen)
+                {
+                    string solDir = Path.GetDirectoryName(dte.Solution.FullName);
+                    if (!string.IsNullOrEmpty(solDir) && Directory.Exists(solDir))
+                        list.Add(solDir);
+
+                    foreach (EnvDTE.Project proj in dte.Solution.Projects)
+                    {
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(proj.FullName) && File.Exists(proj.FullName))
+                            {
+                                string dir = Path.GetDirectoryName(proj.FullName);
+                                if (!list.Contains(dir)) list.Add(dir);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        private static bool OpenInVisualStudio(string filePath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return false;
+                var dte = Package.GetGlobalService(typeof(EnvDTE.DTE)) as EnvDTE.DTE ?? Helper.DteInstance;
+                if (dte != null)
+                {
+                    dte.ItemOperations.OpenFile(filePath);
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private void BtnInspectUia_Click(object sender, EventArgs e)
+        {
+            OpenInspectorForPage(_selectedPage);
+        }
+
+        private void OpenInspectorForPage(ManualPage page)
+        {
+            IntPtr targetHwnd = IntPtr.Zero;
+            string title = null;
+            if (cmbProcess.SelectedIndex >= 0 && _processes.Count > 0)
+            {
+                var proc = _processes[cmbProcess.SelectedIndex];
+                targetHwnd = proc.Hwnd;
+                title = $"{proc.Name} ({proc.Title})";
+            }
+
+            if (targetHwnd != IntPtr.Zero)
+            {
+                using (var dlg = new UiaTreeInspectorDialog(targetHwnd, title, page, page?.DisplayName))
+                {
+                    dlg.ElementAddedToManual += el =>
+                    {
+                        if (page != null) RenderViewDetail(page);
+                    };
+                    dlg.ShowDialog(this);
+                }
+            }
+            else if (page?.Elements?.Count > 0)
+            {
+                using (var dlg = new UiaTreeInspectorDialog(page.Elements, page.DisplayName, page))
+                {
+                    dlg.ElementAddedToManual += el =>
+                    {
+                        if (page != null) RenderViewDetail(page);
+                    };
+                    dlg.ShowDialog(this);
+                }
+            }
+            else
+            {
+                MessageBox.Show("대상 프로세스가 선택되지 않았으며 캡처된 요소도 없습니다.\n상단 Target에서 WPF 프로세스를 선택하거나 캡처를 먼저 진행하세요.", "안내", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
 
         private Control FindBtn(string tag)
@@ -1663,6 +1846,19 @@ namespace AIAssistant
                 Text = text, Width = 26, Height = 22,
                 FlatStyle = FlatStyle.Flat, BackColor = bg,
                 ForeColor = Color.White, Font = new Font("Segoe UI", 7.5f),
+                Cursor = Cursors.Hand
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            return btn;
+        }
+
+        private static Button CreateSmallBtn(string text, int width, int height, Color bg)
+        {
+            var btn = new Button
+            {
+                Text = text, Width = width, Height = height,
+                FlatStyle = FlatStyle.Flat, BackColor = bg,
+                ForeColor = CLR_TEXT, Font = FNT_SMALL,
                 Cursor = Cursors.Hand
             };
             btn.FlatAppearance.BorderSize = 0;

@@ -44,13 +44,25 @@ namespace AIAssistant
         private readonly Dictionary<string, string> _vmLocator    = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // view → vm
         private readonly List<Registration>         _registrations = new List<Registration>();
 
+        private readonly List<string> _roots = new List<string>();
+
         public int XamlCount => _xamlByClass.Count;
         public int RegistrationCount => _registrations.Count;
         public string Root => _root;
 
-        public PrismViewResolver(string sourceRoot)
+        public PrismViewResolver(string sourceRoot, IEnumerable<string> additionalRoots = null)
         {
             _root = sourceRoot;
+            if (!string.IsNullOrEmpty(sourceRoot) && Directory.Exists(sourceRoot))
+                _roots.Add(sourceRoot);
+            if (additionalRoots != null)
+            {
+                foreach (var r in additionalRoots)
+                {
+                    if (!string.IsNullOrEmpty(r) && Directory.Exists(r) && !_roots.Contains(r))
+                        _roots.Add(r);
+                }
+            }
         }
 
         // ─── Index ──────────────────────────────────────────────────────────
@@ -76,14 +88,18 @@ namespace AIAssistant
 
         public void BuildIndex()
         {
-            if (string.IsNullOrEmpty(_root) || !Directory.Exists(_root)) return;
+            if (_roots.Count == 0) return;
 
-            foreach (var file in EnumerateSourceFiles(_root))
+            var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var rootDir in _roots)
             {
-                string ext = Path.GetExtension(file).ToLowerInvariant();
-                string text;
-                try { text = File.ReadAllText(file, Encoding.UTF8); }
-                catch { continue; }
+                foreach (var file in EnumerateSourceFiles(rootDir))
+                {
+                    if (!seenFiles.Add(file)) continue;
+                    string ext = Path.GetExtension(file).ToLowerInvariant();
+                    string text;
+                    try { text = File.ReadAllText(file, Encoding.UTF8); }
+                    catch { continue; }
 
                 if (ext == ".xaml")
                 {
@@ -139,6 +155,7 @@ namespace AIAssistant
 
                 foreach (Match lm in RxVmLocator.Matches(text))
                     _vmLocator[ShortName(lm.Groups["v"].Value)] = ShortName(lm.Groups["vm"].Value);
+                }
             }
 
             // Resolve registration names now that all constants are known.
@@ -181,7 +198,24 @@ namespace AIAssistant
             // 2/3) XAML by class or file name
             if (r.ViewType == null)
             {
-                foreach (var cand in new[] { viewName, viewName + "View", viewName + "_View" })
+                var viewCandidates = new List<string> { viewName };
+                if (viewName.EndsWith("_View", StringComparison.OrdinalIgnoreCase))
+                {
+                    viewCandidates.Add(viewName.Substring(0, viewName.Length - 5));
+                    viewCandidates.Add(viewName.Substring(0, viewName.Length - 5) + "View");
+                }
+                else if (viewName.EndsWith("View", StringComparison.OrdinalIgnoreCase))
+                {
+                    viewCandidates.Add(viewName.Substring(0, viewName.Length - 4));
+                    viewCandidates.Add(viewName.Substring(0, viewName.Length - 4) + "_View");
+                }
+                else
+                {
+                    viewCandidates.Add(viewName + "View");
+                    viewCandidates.Add(viewName + "_View");
+                }
+
+                foreach (var cand in viewCandidates)
                 {
                     if (_xamlByClass.ContainsKey(cand)) { r.ViewType = cand; r.Notes.Add($"x:Class 일치: {cand}"); break; }
                 }
@@ -191,7 +225,25 @@ namespace AIAssistant
             if (r.ViewType != null) _xamlByClass.TryGetValue(r.ViewType, out xaml);
             if (xaml == null)
             {
-                foreach (var cand in new[] { r.ViewType, viewName, viewName + "View" })
+                var fileCandidates = new List<string>();
+                if (r.ViewType != null) fileCandidates.Add(r.ViewType);
+                fileCandidates.Add(viewName);
+                if (viewName.EndsWith("_View", StringComparison.OrdinalIgnoreCase))
+                {
+                    fileCandidates.Add(viewName.Substring(0, viewName.Length - 5));
+                    fileCandidates.Add(viewName.Substring(0, viewName.Length - 5) + "View");
+                }
+                else if (viewName.EndsWith("View", StringComparison.OrdinalIgnoreCase))
+                {
+                    fileCandidates.Add(viewName.Substring(0, viewName.Length - 4));
+                }
+                else
+                {
+                    fileCandidates.Add(viewName + "View");
+                    fileCandidates.Add(viewName + "_View");
+                }
+
+                foreach (var cand in fileCandidates)
                 {
                     if (cand != null && _xamlByFile.TryGetValue(cand, out xaml))
                     {
@@ -252,13 +304,26 @@ namespace AIAssistant
         private static IEnumerable<string> ConventionCandidates(string view)
         {
             if (string.IsNullOrEmpty(view)) yield break;
-            if (view.EndsWith("View")) yield return view + "Model";              // EFEMView → EFEMViewModel
-            if (view.EndsWith("_View")) yield return view.Substring(0, view.Length - 5) + "_ViewModel";
-            yield return view.Replace("View", "ViewModel");                       // MainLayout_View → MainLayout_ViewModel
-            yield return view + "ViewModel";                                      // EFEM → EFEMViewModel
+            if (view.EndsWith("_View", StringComparison.OrdinalIgnoreCase))
+            {
+                string baseName = view.Substring(0, view.Length - 5);
+                yield return baseName + "_ViewModel";
+                yield return baseName + "ViewModel";
+                yield return baseName + "_VM";
+                yield return baseName + "VM";
+            }
+            if (view.EndsWith("View", StringComparison.OrdinalIgnoreCase))
+            {
+                string baseName = view.Substring(0, view.Length - 4);
+                yield return view + "Model";              // EFEMView → EFEMViewModel
+                yield return baseName + "ViewModel";
+                yield return baseName + "_ViewModel";
+                yield return baseName + "VM";
+            }
+            yield return view.Replace("View", "ViewModel");
+            yield return view + "ViewModel";
             yield return view + "_ViewModel";
             yield return view + "VM";
-            if (view.EndsWith("View")) yield return view.Substring(0, view.Length - 4) + "ViewModel";
         }
 
         private static readonly Regex RxXamlDataContext = new Regex(

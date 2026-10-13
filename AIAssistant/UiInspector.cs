@@ -6,6 +6,21 @@ using System.Windows.Automation;
 
 namespace AIAssistant
 {
+    public sealed class WpfProcessInfo
+    {
+        public int Pid { get; set; }
+        public string Name { get; set; }
+        public string Title { get; set; }
+        public IntPtr Hwnd { get; set; }
+    }
+
+    public sealed class UiInspectorNode
+    {
+        public UiElementInfo Info { get; set; }
+        public AutomationElement Element { get; set; }
+        public List<UiInspectorNode> Children { get; set; } = new List<UiInspectorNode>();
+    }
+
     /// <summary>
     /// UI Automation Client — inspects a running WPF process from outside.
     /// Uses System.Windows.Automation (UIAutomationClient.dll) via Control View Walker
@@ -33,11 +48,11 @@ namespace AIAssistant
 
         /// <summary>
         /// Get all WPF processes visible to the user (have at least one window).
-        /// Returns (ProcessId, ProcessName, MainWindowTitle) tuples.
+        /// Returns WpfProcessInfo list.
         /// </summary>
-        public static List<(int Pid, string Name, string Title, IntPtr Hwnd)> GetWpfProcesses()
+        public static List<WpfProcessInfo> GetWpfProcesses()
         {
-            var result = new List<(int, string, string, IntPtr)>();
+            var result = new List<WpfProcessInfo>();
             foreach (var proc in Process.GetProcesses())
             {
                 try
@@ -50,7 +65,13 @@ namespace AIAssistant
                     if (lower == "devenv" || lower == "explorer" || lower == "taskhostw"
                         || lower == "searchui" || lower == "dwm") continue;
 
-                    result.Add((proc.Id, proc.ProcessName, proc.MainWindowTitle, proc.MainWindowHandle));
+                    result.Add(new WpfProcessInfo
+                    {
+                        Pid   = proc.Id,
+                        Name  = proc.ProcessName,
+                        Title = proc.MainWindowTitle,
+                        Hwnd  = proc.MainWindowHandle
+                    });
                 }
                 catch { /* access denied — skip */ }
             }
@@ -332,28 +353,78 @@ namespace AIAssistant
             catch { return false; }
         }
 
-        private static UiElementInfo BuildElementInfo(AutomationElement el, string parentId, int depth)
+        // ─── UI Tree Inspection (Full hierarchy for debugging / inspector UI) ───
+
+        /// <summary>
+        /// Inspects the complete UI Automation tree for a given window.
+        /// Supports ControlView or RawView (all containers included).
+        /// </summary>
+        public static UiInspectorNode InspectTree(IntPtr hwnd, bool rawView = false, int maxDepth = 25)
+        {
+            var root = SafeFromHandle(hwnd);
+            if (root == null) return null;
+            return BuildNode(root, null, 0, rawView, maxDepth);
+        }
+
+        private static UiInspectorNode BuildNode(AutomationElement el, string parentId, int depth, bool rawView, int maxDepth)
+        {
+            if (el == null) return null;
+            var info = BuildElementInfo(el, parentId, depth, includeSuppressed: true);
+            var node = new UiInspectorNode
+            {
+                Element = el,
+                Info = info
+            };
+
+            if (depth >= maxDepth) return node;
+
+            var walker = rawView ? TreeWalker.RawViewWalker : TreeWalker.ControlViewWalker;
+            AutomationElement child;
+            try { child = walker.GetFirstChild(el); }
+            catch { return node; }
+
+            while (child != null)
+            {
+                try
+                {
+                    var childNode = BuildNode(child, info != null ? info.UniqueId : parentId, depth + 1, rawView, maxDepth);
+                    if (childNode != null)
+                        node.Children.Add(childNode);
+                }
+                catch { }
+
+                try { child = walker.GetNextSibling(child); }
+                catch { break; }
+            }
+            return node;
+        }
+
+        private static UiElementInfo BuildElementInfo(AutomationElement el, string parentId, int depth, bool includeSuppressed = false)
         {
             AutomationElement.AutomationElementInformation cur;
             try { cur = el.Current; }
             catch { return null; }
 
-            // Skip offscreen elements
-            if (cur.IsOffscreen) return null;
+            // Skip offscreen elements unless suppressed are included
+            if (!includeSuppressed && cur.IsOffscreen) return null;
 
             // Skip purely decorative types
-            if (SuppressedTypes.Contains(cur.ControlType.Id)) return null;
+            if (!includeSuppressed && SuppressedTypes.Contains(cur.ControlType.Id)) return null;
 
             // Skip zero-size elements
             var rect = cur.BoundingRectangle;
-            if (rect.Width < 2 || rect.Height < 2) return null;
+            if (!includeSuppressed && (rect.Width < 2 || rect.Height < 2)) return null;
+
+            string typeName = cur.ControlType != null && !string.IsNullOrEmpty(cur.ControlType.ProgrammaticName)
+                ? ToCamel(cur.ControlType.ProgrammaticName.Replace("ControlType.", ""))
+                : "custom";
 
             var info = new UiElementInfo
             {
                 Name          = cur.Name ?? "",
                 AutomationId  = cur.AutomationId ?? "",
                 ClassName     = cur.ClassName ?? "",
-                ControlType   = ToCamel(cur.ControlType.ProgrammaticName.Replace("ControlType.", "")),
+                ControlType   = typeName,
                 IsEnabled     = cur.IsEnabled,
                 IsOffscreen   = cur.IsOffscreen,
                 HasKeyboardFocus = cur.HasKeyboardFocus,
@@ -365,11 +436,17 @@ namespace AIAssistant
 
             // ValuePattern
             if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object vp))
-                info.Value = ((ValuePattern)vp).Current.Value;
+            {
+                try { info.Value = ((ValuePattern)vp).Current.Value; } catch { }
+            }
 
             // SupportedPatterns
-            foreach (var pid in el.GetSupportedPatterns())
-                info.SupportedPatterns.Add(pid.ProgrammaticName.Replace("PatternIdentifiers.", "").Replace("Pattern", ""));
+            try
+            {
+                foreach (var pid in el.GetSupportedPatterns())
+                    info.SupportedPatterns.Add(pid.ProgrammaticName.Replace("PatternIdentifiers.", "").Replace("Pattern", ""));
+            }
+            catch { }
 
             // ImportanceScore
             info.ImportanceScore = ComputeImportance(info, el);
@@ -527,6 +604,62 @@ namespace AIAssistant
                 try { ((SelectionItemPattern)p).Select(); return true; }
                 catch { }
             }
+            return false;
+        }
+
+        /// <summary>
+        /// Attempts to activate an element using available automation patterns (Invoke, Select, Toggle, Expand)
+        /// or fallback mouse click on its center point.
+        /// </summary>
+        public static bool TryActivateElement(AutomationElement el, out string methodUsed)
+        {
+            methodUsed = null;
+            if (el == null) return false;
+
+            if (TryInvoke(el)) { methodUsed = "Invoke"; return true; }
+            if (TrySelect(el)) { methodUsed = "Select"; return true; }
+
+            if (el.TryGetCurrentPattern(TogglePattern.Pattern, out object tp))
+            {
+                try
+                {
+                    ((TogglePattern)tp).Toggle();
+                    methodUsed = "Toggle";
+                    return true;
+                }
+                catch { }
+            }
+
+            if (el.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out object ecp))
+            {
+                try
+                {
+                    ((ExpandCollapsePattern)ecp).Expand();
+                    methodUsed = "Expand";
+                    return true;
+                }
+                catch { }
+            }
+
+            // Fallback: mouse click on element bounding rectangle
+            try
+            {
+                var r = el.Current.BoundingRectangle;
+                if (r.Width > 2 && r.Height > 2)
+                {
+                    int cx = (int)(r.Left + r.Width / 2);
+                    int cy = (int)(r.Top + r.Height / 2);
+                    NativeMethods.SetCursorPos(cx, cy);
+                    System.Threading.Thread.Sleep(40);
+                    NativeMethods.mouse_event(NativeMethods.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, UIntPtr.Zero);
+                    System.Threading.Thread.Sleep(40);
+                    NativeMethods.mouse_event(NativeMethods.MOUSEEVENTF_LEFTUP, cx, cy, 0, UIntPtr.Zero);
+                    methodUsed = "MouseClick";
+                    return true;
+                }
+            }
+            catch { }
+
             return false;
         }
     }
