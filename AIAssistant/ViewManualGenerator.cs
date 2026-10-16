@@ -27,8 +27,9 @@ namespace AIAssistant
         public async Task GenerateAsync(ManualProject project, ManualPage page, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            string sys = BuildSystemPrompt(page.DetailLevel);
             string user = BuildUserPrompt(project, page);
-            string response = await LlmClient.AskAsync(SystemPrompt, user);
+            string response = await LlmClient.AskAsync(sys, user);
             ct.ThrowIfCancellationRequested();
 
             if (string.IsNullOrWhiteSpace(response))
@@ -43,25 +44,58 @@ namespace AIAssistant
 
         // ─── Prompt ─────────────────────────────────────────────────────────
 
-        public const string SystemPrompt =
-@"당신은 산업용 장비 제어 소프트웨어(WPF/Prism)의 사용자 매뉴얼을 작성하는 테크니컬 라이터입니다.
+        public static string BuildSystemPrompt(ManualDetailLevel level)
+        {
+            string detailGuide = "";
+            switch (level)
+            {
+                case ManualDetailLevel.Brief:
+                    detailGuide = @"- [상세도: 간단히 (Brief)]
+  • 화면의 목적과 핵심 기능 위주로 요약합니다 (2문장 이내).
+  • 컨트롤은 화면에 보이는 가장 중요한 핵심 버튼/입력 3~6개 위주로 간결하게 1줄로 설명합니다.
+  • 절차는 가장 기본적인 1가지 시나리오만 2~3단계로 축약합니다.";
+                    break;
+                case ManualDetailLevel.Detailed:
+                    detailGuide = @"- [상세도: 상세히 (Detailed / Comprehensive)]
+  • 화면의 목적, 역할, 데이터 처리 흐름을 3~5문장으로 상세히 기술합니다.
+  • 화면에 표시된(Visible) 모든 버튼, 데이터 그리드(DataGrid/Table), 입력란, 콤보박스, 체크박스를 빠짐없이 controls 항목에 포함하여 기술합니다.
+  • 현재 비활성화(Disabled) 상태인 컨트롤이라도 화면에 노출되어 있다면 생략하지 말고 반드시 포함하며, 뷰모델의 CanExecute 조건이나 데이터 입력에 따라 활성화되는 사용 조건(시점)을 명확하게 설명합니다.
+  • 특히 그리드(DataGrid/Table)가 있는 경우, 표시되는 데이터의 성격과 사용자의 조작(선택, 정렬, 행 추가/수정 등)을 명확하게 설명합니다.
+  • 버튼 클릭 시 발생하는 비즈니스 로직 및 상태 변화를 포함합니다.
+  • 사용 절차(procedures)는 정상 수행 시나리오와 조건별 처리 단계를 상세히 단계별로 서술합니다.
+  • 주의사항(notes)에는 데이터 유실 위험, 작업 순서상 필수 확인사항, 제약사항 등을 구체적으로 기술합니다.";
+                    break;
+                default: // Normal
+                    detailGuide = @"- [상세도: 보통 (Normal)]
+  • 화면의 주요 기능과 구성을 명확히 설명합니다 (3문장 내외).
+  • 화면에 표시된 번호(callout) 컨트롤과 화면에 보이는 주요 컨트롤(8~15개)의 기능 및 동작/사용 조건을 기술합니다.
+  • 현재 비활성 상태인 버튼이라도 저장/실행/삭제 등 핵심 기능인 경우 동작 조건과 함께 설명합니다.
+  • 기본 업무 수행 절차와 필수 주의사항을 작성합니다.";
+                    break;
+            }
+
+            return $@"당신은 산업용 장비 제어 소프트웨어(WPF/Prism)의 사용자 매뉴얼을 작성하는 테크니컬 라이터입니다.
 하나의 화면(View)에 대해 실제 운영자가 읽을 매뉴얼 내용을 작성합니다.
+
+상세도 가이드:
+{detailGuide}
 
 규칙:
 1. 제공된 XAML / ViewModel 소스와 화면 정보에서 확인되는 내용만 작성합니다. 추측하지 마세요.
 2. 클래스명, 메서드명, 변수명, 바인딩 경로 같은 기술 용어는 쓰지 말고, 화면에 보이는 라벨/버튼 이름으로 설명합니다.
-3. 버튼의 CanExecute 조건이나 IsEnabled 바인딩이 있으면 '사용 조건'을 컨트롤 설명에 포함합니다.
-4. 컨트롤 설명은 화면의 번호(callout)와 연결합니다. 번호가 없는 중요한 컨트롤도 callout을 null로 하여 포함할 수 있습니다.
+3. 화면에 표시된 컨트롤은 현재 활성/비활성 여부와 무관하게 사용 설명에 포함합니다. 비활성화 상태인 버튼은 어떤 조건(데이터 입력 완료, 행 선택 등)에서 활성화되는지 '사용 조건'을 기술합니다.
+4. 컨트롤 설명은 화면의 번호(callout)와 연결합니다. 번호가 없는 화면 표시 컨트롤도 callout을 null로 하여 빠짐없이 작성합니다.
 5. 자연스러운 한국어 존댓말(~합니다)로 작성합니다.
 6. 반드시 아래 JSON 형식으로만 응답합니다. 마크다운 코드블록이나 다른 텍스트를 붙이지 마세요.
 
-{
-  ""summary"": ""이 화면의 목적과 주요 기능 (2~4문장)"",
-  ""layout"": [ { ""area"": ""영역 이름"", ""description"": ""영역 설명"" } ],
-  ""controls"": [ { ""callout"": 1, ""name"": ""화면에 보이는 컨트롤 이름"", ""description"": ""기능 설명. 사용 조건 포함"" } ],
-  ""procedures"": [ { ""title"": ""작업 이름"", ""steps"": [ ""단계 1"", ""단계 2"" ] } ],
-  ""notes"": [ ""주의사항 (없으면 빈 배열)"" ]
-}";
+{{
+  ""summary"": ""이 화면의 목적과 주요 기능"",
+  ""layout"": [ {{ ""area"": ""영역 이름"", ""description"": ""영역 설명"" }} ],
+  ""controls"": [ {{ ""callout"": 1, ""name"": ""컨트롤 이름"", ""description"": ""기능 설명 및 사용 조건"" }} ],
+  ""procedures"": [ {{ ""title"": ""작업 이름"", ""steps"": [ ""단계 1"", ""단계 2"" ] }} ],
+  ""notes"": [ ""주의사항 또는 필수 확인사항"" ]
+}}";
+        }
 
         public string BuildUserPrompt(ManualProject project, ManualPage page)
         {
@@ -71,6 +105,7 @@ namespace AIAssistant
             if (!string.IsNullOrEmpty(project?.AppName)) sb.AppendLine($"프로그램: {project.AppName}");
             sb.AppendLine($"메뉴 경로: {page.PathText}");
             sb.AppendLine($"메뉴 이름: {page.DisplayName}");
+            sb.AppendLine($"설명 상세도: {page.DetailLevel}");
             if (page.IsHome) sb.AppendLine("홈 화면: 예 (프로그램 시작 시 표시)");
             if (page.Children.Count > 0)
                 sb.AppendLine($"하위 메뉴: {string.Join(", ", page.Children.Select(c => c.DisplayName))}");
@@ -84,8 +119,30 @@ namespace AIAssistant
                     var el = page.Elements.FirstOrDefault(e => e.Id == c.ElementId);
                     string type = el?.ControlType ?? "";
                     string aid  = string.IsNullOrEmpty(el?.AutomationId) ? "" : $" (AutomationId={el.AutomationId})";
-                    string dis  = el != null && !el.IsEnabled ? " [비활성]" : "";
-                    sb.AppendLine($"{c.Number}. [{type}] {c.Label}{aid}{dis}");
+                    string state = el != null ? (el.IsEnabled ? " [활성]" : " [현재 비활성]") : "";
+                    sb.AppendLine($"{c.Number}. [{type}] {c.Label}{aid}{state}");
+                }
+            }
+
+            // Gather visible interactive controls (Buttons, DataGrids, Edits, Combos, Checks, etc.) based on Visibility
+            var visibleControls = page.Elements
+                .Where(e => e.IsVisible && CalloutPlanner.InteractiveTypes.Contains(e.ControlType ?? ""))
+                .Where(e => !CalloutPlanner.Chrome.Contains(e.Name ?? "") && !string.IsNullOrWhiteSpace(e.DisplayLabel))
+                .GroupBy(e => (e.ControlType ?? "") + ":" + e.DisplayLabel)
+                .Select(g => g.First())
+                .ToList();
+
+            if (visibleControls.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("=== 화면에 표시된 주요 컨트롤 목록 (Visible Controls) ===");
+                foreach (var el in visibleControls)
+                {
+                    var co = page.Callouts.FirstOrDefault(c => c.ElementId == el.Id);
+                    string coStr = co != null ? $"[번호 {co.Number}] " : "";
+                    string aid = string.IsNullOrEmpty(el.AutomationId) ? "" : $" (AutomationId={el.AutomationId})";
+                    string state = el.IsEnabled ? " [활성]" : " [현재 비활성]";
+                    sb.AppendLine($"- {coStr}[{el.ControlType}] {el.DisplayLabel}{aid}{state}");
                 }
             }
 

@@ -472,12 +472,9 @@ namespace AIAssistant
         {
             // A4 page: width 11906 dxa, margin 1440 dxa on each side → printable width = 9026 dxa = 5,731,530 EMU (15.8 cm).
             // Page height 16838 dxa, margin 1440 dxa top/bottom → printable height = 13958 dxa = 8,863,330 EMU (24.6 cm).
-            // We set:
-            //   MAX_W = 5400000 EMU (15.0 cm, leaves 0.4cm comfort margin)
-            //   MAX_H = 3600000 EMU (10.0 cm, leaves 14.6cm for titles, text, tables without page overflow)
-            const long MAX_W = 5400000L;
-            const long MAX_H = 3600000L;
-            long EMU_W = MAX_W, EMU_H = 3000000L;
+            const long MAX_W = 5200000L;
+            const long MAX_H = 3800000L;
+            long EMU_W = MAX_W, EMU_H = 2925000L;
             if (_imageSizes.TryGetValue(rId, out Size px) && px.Width > 0 && px.Height > 0)
             {
                 double ratio = (double)px.Height / px.Width;
@@ -492,8 +489,9 @@ namespace AIAssistant
             int docPrId = ++_drawingId;
             return
                 "<w:p><w:pPr>" +
-                "<w:spacing w:before=\"140\" w:after=\"80\" w:line=\"240\" w:lineRule=\"auto\"/>" +
+                "<w:pStyle w:val=\"ManualScreenshot\"/>" +
                 "<w:jc w:val=\"center\"/>" +
+                "<w:spacing w:before=\"140\" w:after=\"80\"/>" +
                 "<w:keepNext/>" +
                 "</w:pPr><w:r><w:drawing>" +
                 "<wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">" +
@@ -647,6 +645,14 @@ namespace AIAssistant
     <w:name w:val=""Normal""/>
     <w:pPr><w:spacing w:before=""0"" w:after=""100"" w:line=""240"" w:lineRule=""auto""/></w:pPr>
     <w:rPr><w:sz w:val=""21""/><w:color w:val=""1E293B""/></w:rPr>
+  </w:style>
+
+  <w:style w:type=""paragraph"" w:styleId=""ManualScreenshot"">
+    <w:name w:val=""Manual Screenshot""/>
+    <w:pPr>
+      <w:jc w:val=""center""/>
+      <w:spacing w:before=""140"" w:after=""80""/>
+    </w:pPr>
   </w:style>
 
   <w:style w:type=""paragraph"" w:styleId=""Heading1"">

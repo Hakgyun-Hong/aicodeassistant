@@ -152,6 +152,11 @@ namespace AIAssistant
             btnLoadProj.Click += BtnLoadProj_Click;
             pnlToolbar.Controls.Add(btnLoadProj);
 
+            var btnOpenHtml = CreateIconBtn("🌐", "Open HTML Manual (.html)", CLR_CARD);
+            btnOpenHtml.Tag = "btnOpenHtml";
+            btnOpenHtml.Click += BtnOpenHtml_Click;
+            pnlToolbar.Controls.Add(btnOpenHtml);
+
             AddSpacer(pnlToolbar, 10);
 
             // UIA Inspector Button
@@ -163,21 +168,24 @@ namespace AIAssistant
             AddSpacer(pnlToolbar, 10);
 
             // Action buttons
-            var btnCapture  = CreateAccentBtn("📸 Capture",  CLR_ACCENT);
-            var btnGenerate = CreateAccentBtn("✨ Generate", CLR_ACCENT2);
-            var btnExport   = CreateAccentBtn("📄 Export DOCX", Color.FromArgb(60, 100, 160));
-            var btnCancel   = CreateAccentBtn("⏹ Cancel",    CLR_DANGER);
+            var btnCapture    = CreateAccentBtn("📸 Capture",     CLR_ACCENT);
+            var btnGenerate   = CreateAccentBtn("✨ Generate",    CLR_ACCENT2);
+            var btnExport     = CreateAccentBtn("📄 Export DOCX", Color.FromArgb(60, 100, 160));
+            var btnExportHtml = CreateAccentBtn("🌐 Export HTML", Color.FromArgb(40, 110, 140));
+            var btnCancel     = CreateAccentBtn("⏹ Cancel",       CLR_DANGER);
 
-            btnCapture.Click  += BtnCapture_Click;
-            btnGenerate.Click += BtnGenerate_Click;
-            btnExport.Click   += BtnExport_Click;
-            btnCancel.Click   += BtnCancel_Click;
+            btnCapture.Click    += BtnCapture_Click;
+            btnGenerate.Click   += BtnGenerate_Click;
+            btnExport.Click     += BtnExport_Click;
+            btnExportHtml.Click += BtnExportHtml_Click;
+            btnCancel.Click     += BtnCancel_Click;
 
-            btnGenerate.Tag = "btnGenerate"; btnGenerate.Enabled = false;
-            btnExport.Tag   = "btnExport";   btnExport.Enabled   = false;
-            btnCancel.Tag   = "btnCancel";   btnCancel.Enabled   = false;
+            btnGenerate.Tag   = "btnGenerate";   btnGenerate.Enabled   = false;
+            btnExport.Tag     = "btnExport";     btnExport.Enabled     = false;
+            btnExportHtml.Tag = "btnExportHtml"; btnExportHtml.Enabled = false;
+            btnCancel.Tag     = "btnCancel";     btnCancel.Enabled     = false;
 
-            pnlToolbar.Controls.AddRange(new Control[] { btnCapture, btnGenerate, btnExport, btnCancel });
+            pnlToolbar.Controls.AddRange(new Control[] { btnCapture, btnGenerate, btnExport, btnExportHtml, btnCancel });
 
             // ── Progress ──
             progressBar = new ProgressBar
@@ -821,6 +829,7 @@ namespace AIAssistant
                         lblStatus.Text = $"✅ XML 로드 완료: {_project.AllPages().Count()}개 메뉴 (솔루션: {solName}, {_viewResolver.XamlCount}개 XAML 인덱싱)";
                         FindBtn("btnGenerate").Enabled = true;
                         FindBtn("btnExport").Enabled   = true;
+                        FindBtn("btnExportHtml").Enabled = true;
                     }, TaskScheduler.FromCurrentSynchronizationContext());
                 }
                 catch (Exception ex)
@@ -882,6 +891,7 @@ namespace AIAssistant
                     lblStatus.Text = $"📂 프로젝트 로드 완료: {_project.AllPages().Count()}개 페이지";
                     FindBtn("btnGenerate").Enabled = true;
                     FindBtn("btnExport").Enabled   = true;
+                    FindBtn("btnExportHtml").Enabled = true;
                 }
                 catch (Exception ex)
                 {
@@ -976,6 +986,47 @@ namespace AIAssistant
                 Location = new Point(14, 38), BackColor = CLR_CARD
             };
             pnlHead.Controls.Add(lblView);
+
+            var lblDetail = new Label
+            {
+                Text = "설명 상세도:",
+                Font = FNT_SMALL, ForeColor = CLR_ACCENT, AutoSize = true,
+                Location = new Point(w - 365, 38), BackColor = CLR_CARD
+            };
+            pnlHead.Controls.Add(lblDetail);
+
+            var cmbDetail = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = FNT_SMALL, BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                FlatStyle = FlatStyle.Flat,
+                Location = new Point(w - 285, 35), Width = 110, Height = 22
+            };
+            cmbDetail.Items.AddRange(new object[] { "⚡ 간단히", "📝 보통", "🔍 상세히" });
+            cmbDetail.SelectedIndex = Math.Min(2, Math.Max(0, (int)page.DetailLevel));
+            cmbDetail.SelectedIndexChanged += (s, e) =>
+            {
+                page.DetailLevel = (ManualDetailLevel)cmbDetail.SelectedIndex;
+                lblStatus.Text = $"ℹ️ '{page.DisplayName}' 상세도 설정: {cmbDetail.SelectedItem}";
+            };
+            pnlHead.Controls.Add(cmbDetail);
+
+            var btnRecap = CreateSmallBtn("🔄 콜아웃 재설정", 110, 22, CLR_CARD_BORDER);
+            btnRecap.Location = new Point(w - 170, 35);
+            btnRecap.Click += (s, e) =>
+            {
+                if (page.Elements != null && page.Elements.Count > 0)
+                {
+                    var oldCallouts = page.Callouts;
+                    string xaml = !string.IsNullOrEmpty(page.ViewXamlPath) && File.Exists(page.ViewXamlPath)
+                        ? File.ReadAllText(page.ViewXamlPath) : "";
+                    page.Callouts = CalloutPlanner.Suggest(page.Elements, _project?.AllMenuNames(), xaml, page.WindowRect, page.DetailLevel);
+                    CalloutPlanner.SyncControlsAfterRecapture(page, oldCallouts);
+                    RenderViewDetail(page);
+                    lblStatus.Text = $"ℹ️ '{page.DisplayName}' 콜아웃 {page.Callouts.Count}개 재설정 완료 (상세도: {page.DetailLevel})";
+                }
+            };
+            pnlHead.Controls.Add(btnRecap);
 
             // Row 3: XAML source path & Open in VS / Browse
             int yRow3 = 66;
@@ -1145,6 +1196,10 @@ namespace AIAssistant
             var lblCtrl = new Label { Text = "🎛 컨트롤 설명 (Controls)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(0, 4), AutoSize = true };
             pnlCtrlHeader.Controls.Add(lblCtrl);
 
+            var btnImportVisible = CreateSmallBtn("💡 화면 컨트롤 추가", 125, 24, CLR_CARD_BORDER);
+            btnImportVisible.Location = new Point(w - 420, 2);
+            pnlCtrlHeader.Controls.Add(btnImportVisible);
+
             var btnAddCtrl = CreateSmallBtn("➕ 항목 추가", 80, 24, CLR_CARD_BORDER);
             btnAddCtrl.Location = new Point(w - 290, 2);
             pnlCtrlHeader.Controls.Add(btnAddCtrl);
@@ -1194,6 +1249,45 @@ namespace AIAssistant
             grid.CellValueChanged += (s, e) => syncAndRefresh();
             grid.RowsRemoved += (s, e) => syncAndRefresh();
             grid.DataError += (s, e) => { e.ThrowException = false; e.Cancel = false; };
+
+            btnImportVisible.Click += (s, e) =>
+            {
+                if (page.Elements == null || page.Elements.Count == 0)
+                {
+                    lblStatus.Text = "ℹ️ 먼저 화면을 캡처해야 컨트롤을 분석할 수 있습니다.";
+                    return;
+                }
+                var existingNames = new HashSet<string>(page.Controls.Select(c => c.Name).Where(n => !string.IsNullOrEmpty(n)), StringComparer.OrdinalIgnoreCase);
+                var visibleControls = page.Elements
+                    .Where(el => el.IsVisible && CalloutPlanner.InteractiveTypes.Contains(el.ControlType ?? ""))
+                    .Where(el => !CalloutPlanner.Chrome.Contains(el.Name ?? "") && !string.IsNullOrWhiteSpace(el.DisplayLabel))
+                    .GroupBy(el => el.DisplayLabel)
+                    .Select(g => g.First())
+                    .Where(el => !existingNames.Contains(el.DisplayLabel))
+                    .ToList();
+
+                if (visibleControls.Count == 0)
+                {
+                    lblStatus.Text = "ℹ️ 추가할 새로운 화면 컨트롤이 없습니다.";
+                    return;
+                }
+
+                foreach (var el in visibleControls)
+                {
+                    var co = page.Callouts.FirstOrDefault(c => c.ElementId == el.Id);
+                    int? calloutNum = co != null ? (int?)co.Number : null;
+                    string stateNote = el.IsEnabled ? "" : " (조건 충족 시 활성화)";
+                    bindingList.Add(new ControlDesc
+                    {
+                        Callout = calloutNum,
+                        Name = el.DisplayLabel,
+                        Description = $"{el.ControlType} 컨트롤{stateNote}",
+                        ElementId = el.Id
+                    });
+                }
+                syncAndRefresh();
+                lblStatus.Text = $"✅ 화면 컨트롤 {visibleControls.Count}개 추가 완료";
+            };
 
             btnAddCtrl.Click += (s, e) =>
             {
@@ -1286,12 +1380,18 @@ namespace AIAssistant
 
                     string xamlText = File.Exists(page.ViewXamlPath) ? File.ReadAllText(page.ViewXamlPath) : null;
                     ViewNavigator.CaptureInto(page, proc.Hwnd, _tempDir, _project?.AllMenuNames(), xamlText);
+
+                    // Discover and crawl visible sub-tabs inside this view
+                    ViewNavigator.CrawlTabsForPage(page, proc.Hwnd, _tempDir, _project?.AllMenuNames(), xamlText,
+                        CancellationToken.None, msg => BeginInvoke((Action)(() => lblStatus.Text = msg)));
                 });
 
                 page.Status = PageStatus.Captured;
                 RenderViewDetail(page);
                 PopulatePagesTree();
-                lblStatus.Text = $"✅ '{page.DisplayName}' 캡처 완료 (Callouts: {page.Callouts.Count}개)";
+                lblStatus.Text = page.Children.Count > 0
+                    ? $"✅ '{page.DisplayName}' 캡처 완료 (하위 탭 {page.Children.Count}개 순회 및 트리 추가 완료)"
+                    : $"✅ '{page.DisplayName}' 캡처 완료 (Callouts: {page.Callouts.Count}개)";
             }
             catch (Exception ex)
             {
@@ -1368,6 +1468,10 @@ namespace AIAssistant
                             ViewNavigator.NavigateTo(proc.Hwnd, p.NavPath, _project.NavDelayMs, _cts.Token);
                             string xamlText = File.Exists(p.ViewXamlPath) ? File.ReadAllText(p.ViewXamlPath) : null;
                             ViewNavigator.CaptureInto(p, proc.Hwnd, _tempDir, _project.AllMenuNames(), xamlText);
+
+                            // Discover and crawl visible sub-tabs inside this view
+                            ViewNavigator.CrawlTabsForPage(p, proc.Hwnd, _tempDir, _project.AllMenuNames(), xamlText,
+                                _cts.Token, msg => BeginInvoke((Action)(() => lblStatus.Text = msg)));
                         }, _cts.Token);
                         p.Status = PageStatus.Captured;
                         UpdateProgress(done, pagesToCap.Count);
@@ -1480,6 +1584,7 @@ namespace AIAssistant
                     if (_selectedPage != null) RenderViewDetail(_selectedPage);
                     lblStatus.Text = $"✅ {done}개 페이지 매뉴얼 생성 완료! 내용을 확인/수정한 뒤 📄 Export DOCX를 클릭하세요.";
                     FindBtn("btnExport").Enabled = true;
+                    FindBtn("btnExportHtml").Enabled = true;
                 }
                 catch (OperationCanceledException)
                 { lblStatus.Text = "⏹ 생성이 취소됐습니다."; }
@@ -1503,6 +1608,7 @@ namespace AIAssistant
                 RenderCards();
                 SetBusy(false, "✅ 매뉴얼 생성 완료. 각 카드에서 내용을 확인/편집 후 📄 Export DOCX를 클릭하세요.");
                 FindBtn("btnExport").Enabled = true;
+                FindBtn("btnExportHtml").Enabled = true;
             }
             catch (OperationCanceledException)
             { lblStatus.Text = "⏹ 생성이 취소됐습니다."; }
@@ -1512,6 +1618,93 @@ namespace AIAssistant
             {
                 SetBusy(false, "");
                 FindBtn("btnCancel").Enabled = false;
+            }
+        }
+
+        // ── Export (HTML) ──
+        private void BtnExportHtml_Click(object sender, EventArgs e)
+        {
+            if (_project == null)
+            {
+                MessageBox.Show("내보낼 매뉴얼 프로젝트가 없습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using (var dlg = new SaveFileDialog
+            {
+                Title = "인터랙티브 웹 매뉴얼 내보내기 (HTML)",
+                Filter = ManualHtmlManager.FileFilter,
+                FileName = $"{_project.AppName}_Manual_{DateTime.Now:yyyyMMdd}.html"
+            })
+            {
+                if (dlg.ShowDialog() != DialogResult.OK) return;
+
+                try
+                {
+                    SetBusy(true, "🌐 독립형 반응형 HTML 매뉴얼 생성 중...");
+                    ManualHtmlManager.Export(_project, dlg.FileName, embedImages: true);
+                    lblStatus.Text = $"✅ HTML 매뉴얼 저장 완료: {Path.GetFileName(dlg.FileName)}";
+
+                    var res = MessageBox.Show($"HTML 웹 매뉴얼이 생성되었습니다.\n\n저장 경로: {dlg.FileName}\n\n지금 웹 브라우저에서 열람하시겠습니까?",
+                        "내보내기 완료", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                    if (res == DialogResult.Yes)
+                    {
+                        try { System.Diagnostics.Process.Start(dlg.FileName); } catch { }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lblStatus.Text = $"⚠️ HTML 내보내기 오류: {ex.Message}";
+                    MessageBox.Show($"HTML 내보내기 실패:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    SetBusy(false, "");
+                }
+            }
+        }
+
+        // ── Import (HTML) ──
+        private void BtnOpenHtml_Click(object sender, EventArgs e)
+        {
+            using (var dlg = new OpenFileDialog
+            {
+                Title = "HTML 매뉴얼 열기 (가져오기)",
+                Filter = ManualHtmlManager.FileFilter
+            })
+            {
+                if (dlg.ShowDialog() != DialogResult.OK) return;
+
+                try
+                {
+                    SetBusy(true, "🌐 HTML 매뉴얼 및 프로젝트 메타데이터 복원 중...");
+                    var project = ManualHtmlManager.Import(dlg.FileName);
+                    _project = project;
+
+                    string solDir = _project.SourceRoot ?? GetSolutionDirectory() ?? Path.GetDirectoryName(dlg.FileName);
+                    var projectDirs = GetSolutionProjectDirectories();
+                    _viewResolver = new PrismViewResolver(solDir, projectDirs);
+
+                    Task.Run(() =>
+                    {
+                        _viewResolver.BuildIndex();
+                        foreach (var page in _project.AllPages())
+                            _viewResolver.ApplyTo(page);
+                    }).ContinueWith(t =>
+                    {
+                        SetBusy(false, "");
+                        PopulatePagesTree();
+                        lblStatus.Text = $"✅ HTML 매뉴얼 로드 완료: {_project.AllPages().Count()}개 페이지 복원됨 ({Path.GetFileName(dlg.FileName)})";
+                        FindBtn("btnGenerate").Enabled = true;
+                        FindBtn("btnExport").Enabled   = true;
+                        FindBtn("btnExportHtml").Enabled = true;
+                    }, TaskScheduler.FromCurrentSynchronizationContext());
+                }
+                catch (Exception ex)
+                {
+                    SetBusy(false, "");
+                    MessageBox.Show($"HTML 파일 가져오기 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
 

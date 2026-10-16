@@ -92,8 +92,118 @@ namespace AIAssistant
                 .Select(ElementLite.From).ToList();
 
             var oldCallouts = page.Callouts;
-            page.Callouts = CalloutPlanner.Suggest(page.Elements, menuNames, viewXamlText, page.WindowRect);
+            page.Callouts = CalloutPlanner.Suggest(page.Elements, menuNames, viewXamlText, page.WindowRect, page.DetailLevel);
             CalloutPlanner.SyncControlsAfterRecapture(page, oldCallouts);
+        }
+
+        /// <summary>
+        /// Finds visible TabItem elements inside the specified window.
+        /// </summary>
+        public static List<AutomationElement> FindVisibleTabs(IntPtr mainHwnd)
+        {
+            var list = new List<AutomationElement>();
+            var root = UiInspector.SafeFromHandle(mainHwnd);
+            if (root == null) return list;
+
+            try
+            {
+                var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem);
+                var tabs = root.FindAll(TreeScope.Descendants, cond);
+                if (tabs != null)
+                {
+                    foreach (AutomationElement tab in tabs)
+                    {
+                        try
+                        {
+                            var cur = tab.Current;
+                            if (!cur.IsOffscreen && cur.BoundingRectangle.Width >= 4 && cur.BoundingRectangle.Height >= 4)
+                            {
+                                string name = !string.IsNullOrWhiteSpace(cur.Name) ? cur.Name.Trim() : cur.AutomationId;
+                                if (!string.IsNullOrWhiteSpace(name))
+                                    list.Add(tab);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        /// <summary>
+        /// Crawls visible TabItems inside the current view, creates child ManualPages for each tab,
+        /// and captures them, enriching the page tree with tab sub-pages.
+        /// </summary>
+        public static List<ManualPage> CrawlTabsForPage(
+            ManualPage parentPage, IntPtr mainHwnd, string tempDir,
+            HashSet<string> menuNames, string viewXamlText,
+            CancellationToken ct, Action<string> progress = null)
+        {
+            var results = new List<ManualPage>();
+            if (parentPage == null) return results;
+
+            var tabs = FindVisibleTabs(mainHwnd);
+            if (tabs.Count <= 1) return results; // Single tab or none: no sub-page breakdown needed
+
+            if (parentPage.Children == null)
+                parentPage.Children = new List<ManualPage>();
+
+            progress?.Invoke($"  📑 '{parentPage.DisplayName}' 내부 {tabs.Count}개 하위 탭 순회 중...");
+
+            int tabIndex = 0;
+            foreach (var tab in tabs)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                string tabName;
+                try
+                {
+                    var cur = tab.Current;
+                    tabName = !string.IsNullOrWhiteSpace(cur.Name) ? cur.Name.Trim() : cur.AutomationId;
+                }
+                catch { continue; }
+
+                if (string.IsNullOrWhiteSpace(tabName)) continue;
+
+                progress?.Invoke($"  ↳ 탭 전환 ({++tabIndex}/{tabs.Count}): {tabName}");
+
+                // Switch to the tab
+                string act = Activate(tab);
+                Thread.Sleep(350); // wait for WPF tab transition and rendering
+
+                // Find existing child page or create new
+                var childPage = parentPage.Children.FirstOrDefault(c => string.Equals(c.DisplayName, tabName, StringComparison.OrdinalIgnoreCase));
+                if (childPage == null)
+                {
+                    var path = new List<string>(parentPage.NavPath ?? new List<string>()) { tabName };
+                    childPage = new ManualPage
+                    {
+                        DisplayName  = tabName,
+                        ViewName     = parentPage.ViewName,
+                        ViewXamlPath = parentPage.ViewXamlPath,
+                        ViewModelPath = parentPage.ViewModelPath,
+                        IsHome       = false,
+                        Depth        = parentPage.Depth + 1,
+                        NavPath      = path,
+                        DetailLevel  = parentPage.DetailLevel
+                    };
+                    parentPage.Children.Add(childPage);
+                }
+
+                // Capture the tab sub-page
+                CaptureInto(childPage, mainHwnd, tempDir, menuNames, viewXamlText);
+                childPage.Status = PageStatus.Captured;
+                results.Add(childPage);
+            }
+
+            // Switch back to the first tab for clean state
+            if (tabs.Count > 0)
+            {
+                try { Activate(tabs[0]); Thread.Sleep(200); } catch { }
+            }
+
+            return results;
         }
 
         // ─── Element search ─────────────────────────────────────────────────
@@ -293,36 +403,48 @@ namespace AIAssistant
     /// </summary>
     public static class CalloutPlanner
     {
-        public const int MaxCallouts = 15;
-
-        private static readonly HashSet<string> Chrome = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        public static readonly HashSet<string> Chrome = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "Minimize", "Maximize", "Close", "Restore", "최소화", "최대화", "닫기", "이전 크기로 복원", "System", "시스템" };
 
-        private static readonly HashSet<string> InteractiveTypes = new HashSet<string>
+        public static readonly HashSet<string> InteractiveTypes = new HashSet<string>
         {
             "button", "comboBox", "checkBox", "radioButton", "edit", "tabItem", "menuItem",
             "slider", "hyperlink", "dataGrid", "list", "tree", "table", "spinner", "splitButton"
         };
 
         public static List<PageCallout> Suggest(List<ElementLite> elements, HashSet<string> menuNames,
-            string viewXaml, System.Windows.Rect windowRect)
+            string viewXaml, System.Windows.Rect windowRect, ManualDetailLevel detailLevel = ManualDetailLevel.Normal)
         {
+            int maxCallouts = detailLevel == ManualDetailLevel.Brief ? 8 :
+                              detailLevel == ManualDetailLevel.Detailed ? 30 : 15;
+
             var scored = new List<(ElementLite El, int Score)>();
             foreach (var e in elements)
             {
+                if (!e.IsVisible) continue; // Must be rendered and visible on screen
                 if (!InteractiveTypes.Contains(e.ControlType ?? "")) continue;
                 if (Chrome.Contains(e.Name ?? "")) continue;
                 if (e.W * e.H < 64) continue;
                 if (windowRect.Width > 0 && (e.W >= windowRect.Width * 0.95 && e.H >= windowRect.Height * 0.8)) continue;
 
                 int s = e.Importance;
+
+                // XAML definition boost
                 bool inXaml = AppearsInXaml(viewXaml, e.Name) || AppearsInXaml(viewXaml, e.AutomationId);
                 if (inXaml) s += 5;
+
+                // Priority for major interactive controls: Buttons, Grids, Tables, Edits, Combos, Checks
+                // (Independent of IsEnabled, since disabled buttons/grids also require documentation)
+                if (e.ControlType == "button" || e.ControlType == "splitButton") s += 5;
+                if (e.ControlType == "dataGrid" || e.ControlType == "table" || e.ControlType == "list" || e.ControlType == "tree") s += 5;
+                if (e.ControlType == "comboBox" || e.ControlType == "edit" || e.ControlType == "checkBox" || e.ControlType == "radioButton") s += 3;
 
                 bool isMenu = menuNames != null && !string.IsNullOrWhiteSpace(e.Name) && menuNames.Contains(e.Name.Trim());
                 if (isMenu && !inXaml) continue;  // global navigation chrome, not part of this View
 
-                if (s >= 3) scored.Add((e, s));
+                int threshold = detailLevel == ManualDetailLevel.Detailed ? 1 :
+                                detailLevel == ManualDetailLevel.Normal ? 2 : 3;
+                if (s >= threshold) scored.Add((e, s));
             }
 
             // Drop near-duplicates (same rectangle reported by nested elements)
@@ -333,7 +455,7 @@ namespace AIAssistant
                                     Math.Abs(p.W - x.El.W) < 6 && Math.Abs(p.H - x.El.H) < 6))
                     continue;
                 picked.Add(x.El);
-                if (picked.Count >= MaxCallouts) break;
+                if (picked.Count >= maxCallouts) break;
             }
 
             var ordered = ReadingOrder(picked);

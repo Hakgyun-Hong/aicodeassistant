@@ -22,6 +22,14 @@ namespace AIAssistant
 
     public enum PageStatus { New, Captured, Generated, Edited, Error }
 
+    /// <summary>Per-page explanation detail level for LLM generation.</summary>
+    public enum ManualDetailLevel
+    {
+        Brief,     // 간단히 (핵심 요약 및 주요 버튼 위주)
+        Normal,    // 보통 (기본값: 표준 구성 및 주요 컨트롤)
+        Detailed   // 상세히 (활성화된 모든 버튼, 그리드, 세부 동작 및 조건)
+    }
+
     /// <summary>Lightweight, serializable UI element (from UI Automation).</summary>
     [DataContract]
     public sealed class ElementLite
@@ -31,6 +39,7 @@ namespace AIAssistant
         [DataMember] public string AutomationId { get; set; }
         [DataMember] public string ControlType  { get; set; }
         [DataMember] public bool   IsEnabled    { get; set; }
+        [DataMember] public bool   IsOffscreen  { get; set; }
         [DataMember] public int    Importance   { get; set; }
         [DataMember] public double X { get; set; }
         [DataMember] public double Y { get; set; }
@@ -38,6 +47,9 @@ namespace AIAssistant
         [DataMember] public double H { get; set; }
 
         public System.Windows.Rect Rect => new System.Windows.Rect(X, Y, Math.Max(0, W), Math.Max(0, H));
+
+        /// <summary>Returns true if the element is rendered and visible on screen.</summary>
+        public bool IsVisible => !IsOffscreen && W >= 2 && H >= 2;
 
         public string DisplayLabel =>
             !string.IsNullOrWhiteSpace(Name) ? Name.Trim() :
@@ -50,6 +62,7 @@ namespace AIAssistant
             AutomationId = e.AutomationId,
             ControlType  = e.ControlType,
             IsEnabled    = e.IsEnabled,
+            IsOffscreen  = e.IsOffscreen,
             Importance   = e.ImportanceScore,
             X = e.BoundingRectangle.X, Y = e.BoundingRectangle.Y,
             W = e.BoundingRectangle.Width, H = e.BoundingRectangle.Height
@@ -124,6 +137,17 @@ namespace AIAssistant
         [DataMember] public List<ControlDesc> Controls { get; set; } = new List<ControlDesc>();
         [DataMember] public string Procedures { get; set; } = "";
         [DataMember] public string Notes      { get; set; } = "";
+        [DataMember] public string DetailLevelText { get; set; } = ManualDetailLevel.Normal.ToString();
+
+        public ManualDetailLevel DetailLevel
+        {
+            get
+            {
+                ManualDetailLevel level;
+                return Enum.TryParse(DetailLevelText, out level) ? level : ManualDetailLevel.Normal;
+            }
+            set { DetailLevelText = value.ToString(); }
+        }
 
         // ── Status ──
         [DataMember] public string StatusText    { get; set; } = PageStatus.New.ToString();

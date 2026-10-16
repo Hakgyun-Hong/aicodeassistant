@@ -485,8 +485,7 @@ namespace AIAssistant
             if (info.SupportedPatterns.Contains("ExpandCollapse"))  score += 1;
             if (info.SupportedPatterns.Contains("Toggle"))          score += 1;
 
-            // State bonuses
-            if (!info.IsEnabled)       score -= 1;  // disabled but still worth noting
+            // State & metadata bonuses
             if (!string.IsNullOrEmpty(info.Name)) score += 1;
             if (!string.IsNullOrEmpty(info.AutomationId)) score += 2;
             if (!string.IsNullOrEmpty(info.HelpText))  score += 1;
@@ -680,6 +679,11 @@ namespace AIAssistant
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+        public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+        public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);

@@ -33,20 +33,51 @@ namespace AIAssistant
                 Directory.CreateDirectory(tempDir);
                 string outPath = Path.Combine(tempDir, $"{tag}.png");
 
-                NativeMethods.GetWindowRect(hwnd, out var wr);
-                int w = wr.Right  - wr.Left;
-                int h = wr.Bottom - wr.Top;
-                if (w < 1 || h < 1) return null;
+                if (NativeMethods.IsIconic(hwnd))
+                    NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
 
-                using (var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
-                using (var g   = Graphics.FromImage(bmp))
+                var bounds = GetPhysicalWindowBounds(hwnd);
+                if (bounds.Width < 10 || bounds.Height < 10) return null;
+
+                Bitmap bmp = null;
+
+                // 1. Primary: CopyFromScreen (captures true unclipped GPU/DPI rendered pixels)
+                try
                 {
-                    IntPtr hdc = g.GetHdc();
-                    // PW_RENDERFULLCONTENT = 0x00000002 — captures offscreen WPF content too
-                    NativeMethods.PrintWindow(hwnd, hdc, 0x00000002);
-                    g.ReleaseHdc(hdc);
-                    bmp.Save(outPath, ImageFormat.Png);
+                    NativeMethods.SetForegroundWindow(hwnd);
+                    System.Threading.Thread.Sleep(80);
+
+                    bounds = GetPhysicalWindowBounds(hwnd);
+                    var screenBmp = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
+                    using (var g = Graphics.FromImage(screenBmp))
+                    {
+                        g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
+                    }
+
+                    if (!IsMostlyEmpty(screenBmp))
+                        bmp = screenBmp;
+                    else
+                        screenBmp.Dispose();
                 }
+                catch (Exception ex)
+                {
+                    Log($"CopyFromScreen failed, falling back to PrintWindow: {ex.Message}");
+                }
+
+                // 2. Fallback: PrintWindow (for background/virtual desktop scenarios)
+                if (bmp == null)
+                {
+                    bmp = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb);
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        NativeMethods.PrintWindow(hwnd, hdc, 0x00000002);
+                        g.ReleaseHdc(hdc);
+                    }
+                }
+
+                bmp.Save(outPath, ImageFormat.Png);
+                bmp.Dispose();
                 return outPath;
             }
             catch (Exception ex)
@@ -54,6 +85,42 @@ namespace AIAssistant
                 Log($"CaptureWindow failed: {ex.Message}");
                 return null;
             }
+        }
+
+        public static Rectangle GetPhysicalWindowBounds(IntPtr hwnd)
+        {
+            try
+            {
+                int size = System.Runtime.InteropServices.Marshal.SizeOf(typeof(NativeMethods.RECT));
+                int hr = NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_EXTENDED_FRAME_BOUNDS, out var r, size);
+                if (hr == 0 && (r.Right - r.Left) > 10 && (r.Bottom - r.Top) > 10)
+                {
+                    return new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
+                }
+            }
+            catch { }
+
+            NativeMethods.GetWindowRect(hwnd, out var wr);
+            return new Rectangle(wr.Left, wr.Top, Math.Max(0, wr.Right - wr.Left), Math.Max(0, wr.Bottom - wr.Top));
+        }
+
+        private static bool IsMostlyEmpty(Bitmap bmp)
+        {
+            int emptyCount = 0;
+            int total = 0;
+            int stepX = Math.Max(1, bmp.Width / 6);
+            int stepY = Math.Max(1, bmp.Height / 6);
+            for (int x = stepX; x < bmp.Width; x += stepX)
+            {
+                for (int y = stepY; y < bmp.Height; y += stepY)
+                {
+                    total++;
+                    Color c = bmp.GetPixel(x, y);
+                    if (c.A == 0 || (c.R == 0 && c.G == 0 && c.B == 0))
+                        emptyCount++;
+                }
+            }
+            return total > 0 && (double)emptyCount / total > 0.95;
         }
 
         /// <summary>

@@ -97,6 +97,7 @@
     <Compile Include="UiSourceMapper.cs" />
     <Compile Include="ManualGenerator.cs" />
     <Compile Include="ManualExporter.cs" />
+    <Compile Include="ManualHtmlManager.cs" />
     <Compile Include="ManualEditorPanel.cs" />
     <Compile Include="ManualToolWindow.cs" />
     <Compile Include="OpenManualCommand.cs" />
