@@ -52,11 +52,11 @@ namespace AIAssistant
             };
             int order = 0;
             foreach (var root in project.Roots)
-                AddPageBlocks(doc, root, tempDir, ref order);
+                AddPageBlocks(doc, root, project, tempDir, ref order);
             return doc;
         }
 
-        private static void AddPageBlocks(ManualDocument doc, ManualPage page, string tempDir, ref int order)
+        private static void AddPageBlocks(ManualDocument doc, ManualPage page, ManualProject project, string tempDir, ref int order)
         {
             if (!page.IsIncluded) return;
 
@@ -77,9 +77,19 @@ namespace AIAssistant
             if (page.HasScreenshot)
             {
                 string img = page.ScreenshotPath;
-                if (page.ShowCallouts && page.Callouts.Count > 0)
-                    img = ScreenCaptureEngine.AnnotateScreenshot(page.ScreenshotPath, page.CalloutItems(),
-                        page.WindowRect, tempDir, $"export_{page.Id}");
+                bool includeCallouts = project?.WordIncludeCallouts ?? false;
+                if (includeCallouts && page.ShowCallouts && page.Callouts.Count > 0)
+                {
+                    try
+                    {
+                        img = ScreenCaptureEngine.AnnotateScreenshot(page.ScreenshotPath, page.CalloutItems(),
+                            page.WindowRect, tempDir, $"export_{page.Id}");
+                    }
+                    catch
+                    {
+                        img = page.ScreenshotPath;
+                    }
+                }
                 doc.Blocks.Add(new ManualBlock
                 {
                     Type = ManualBlockType.Screenshot,
@@ -97,8 +107,12 @@ namespace AIAssistant
             {
                 var table = new ManualBlock { Type = ManualBlockType.Table, Title = "화면 구성 요소 및 기능 설명", Order = order++ };
                 table.TableRows.Add(new[] { "번호", "컨트롤 / 항목", "기능 및 사용 조건" });
+                int rowIdx = 1;
                 foreach (var c in rows)
-                    table.TableRows.Add(new[] { c.Callout.HasValue ? GetCircleNumber(c.Callout.Value) : "-", c.Name ?? "", c.Description ?? "" });
+                {
+                    string numStr = c.Callout.HasValue ? GetCircleNumber(c.Callout.Value) : (rowIdx++).ToString();
+                    table.TableRows.Add(new[] { numStr, c.Name ?? "", c.Description ?? "" });
+                }
                 doc.Blocks.Add(table);
             }
 
@@ -109,7 +123,7 @@ namespace AIAssistant
                 doc.Blocks.Add(new ManualBlock { Type = ManualBlockType.Warning, Title = "주의 및 확인사항", Content = page.Notes, Order = order++ });
 
             foreach (var child in page.Children)
-                AddPageBlocks(doc, child, tempDir, ref order);
+                AddPageBlocks(doc, child, project, tempDir, ref order);
         }
 
         public static void ExportDocx(ManualDocument doc, string outputPath)

@@ -235,8 +235,33 @@ namespace AIAssistant
                 Font = FNT_BODY,
                 FullRowSelect = true,
                 ShowLines = true,
-                HideSelection = false
+                HideSelection = false,
+                CheckBoxes = true
             };
+
+            bool syncingChecks = false;
+            treePages.AfterCheck += (s, e) =>
+            {
+                if (syncingChecks) return;
+                if (e.Node?.Tag is ManualPage page)
+                {
+                    page.IsIncluded = e.Node.Checked;
+                    e.Node.ForeColor = e.Node.Checked ? CLR_TEXT : CLR_TEXT_DIM;
+
+                    if (e.Node.Nodes.Count > 0)
+                    {
+                        try
+                        {
+                            syncingChecks = true;
+                            SetChildrenChecked(e.Node, e.Node.Checked);
+                        }
+                        finally { syncingChecks = false; }
+                    }
+
+                    lblStatus.Text = $"ℹ️ '{page.DisplayName}' 매뉴얼 포함: {(page.IsIncluded ? "선택됨" : "제외됨")}";
+                }
+            };
+
             treePages.AfterSelect += (s, e) =>
             {
                 if (e.Node?.Tag is ManualPage page)
@@ -245,6 +270,39 @@ namespace AIAssistant
                     RenderViewDetail(page);
                 }
             };
+
+            var mnuTree = new ContextMenuStrip();
+            mnuTree.Items.Add(new ToolStripMenuItem("☑️ 전체 페이지 선택", null, (s, e) =>
+            {
+                if (_project == null) return;
+                foreach (var p in _project.AllPages()) p.IsIncluded = true;
+                PopulatePagesTree();
+            }));
+            mnuTree.Items.Add(new ToolStripMenuItem("⬜ 전체 페이지 해제", null, (s, e) =>
+            {
+                if (_project == null) return;
+                foreach (var p in _project.AllPages()) p.IsIncluded = false;
+                PopulatePagesTree();
+            }));
+            mnuTree.Items.Add(new ToolStripMenuItem("🔄 선택 반전", null, (s, e) =>
+            {
+                if (_project == null) return;
+                foreach (var p in _project.AllPages()) p.IsIncluded = !p.IsIncluded;
+                PopulatePagesTree();
+            }));
+            mnuTree.Items.Add(new ToolStripSeparator());
+            mnuTree.Items.Add(new ToolStripMenuItem("🎯 이 페이지만 캡처", null, async (s, e) =>
+            {
+                if (treePages.SelectedNode?.Tag is ManualPage p)
+                    await CapturePageAsync(p);
+            }));
+            mnuTree.Items.Add(new ToolStripMenuItem("✨ 이 페이지만 LLM 생성", null, async (s, e) =>
+            {
+                if (treePages.SelectedNode?.Tag is ManualPage p)
+                    await GeneratePageAsync(p);
+            }));
+            treePages.ContextMenuStrip = mnuTree;
+
             splitMain.Panel1.Controls.Add(treePages);
 
             // Right: Detail panel
@@ -926,10 +984,26 @@ namespace AIAssistant
                           page.HasContent ? "📝 " :
                           page.HasView ? "📄 " : "📁 ";
             string text = icon + page.DisplayName + (string.IsNullOrEmpty(page.ViewName) ? "" : $" ({page.ViewName})");
-            var node = new TreeNode(text) { Tag = page };
+            var node = new TreeNode(text)
+            {
+                Tag = page,
+                Checked = page.IsIncluded,
+                ForeColor = page.IsIncluded ? CLR_TEXT : CLR_TEXT_DIM
+            };
             foreach (var ch in page.Children)
                 node.Nodes.Add(BuildTreeNode(ch));
             return node;
+        }
+
+        private static void SetChildrenChecked(TreeNode parent, bool isChecked)
+        {
+            foreach (TreeNode child in parent.Nodes)
+            {
+                child.Checked = isChecked;
+                if (child.Tag is ManualPage cp) cp.IsIncluded = isChecked;
+                child.ForeColor = isChecked ? CLR_TEXT : CLR_TEXT_DIM;
+                SetChildrenChecked(child, isChecked);
+            }
         }
 
         private void RenderViewDetail(ManualPage page)
@@ -1129,9 +1203,24 @@ namespace AIAssistant
             pnlImg.Controls.Add(lblImgHead);
 
             var btnInspectUiaImg = CreateSmallBtn("🔍 UIA 트리 검토", 115, 22, CLR_CARD_BORDER);
-            btnInspectUiaImg.Location = new Point(w - 270, 6);
+            btnInspectUiaImg.Location = new Point(w - 480, 6);
             btnInspectUiaImg.Click += (s, e) => OpenInspectorForPage(page);
             pnlImg.Controls.Add(btnInspectUiaImg);
+
+            var chkWordCallouts = new CheckBox
+            {
+                Text = "Word 출력 시 콜아웃 포함",
+                Checked = _project?.WordIncludeCallouts ?? false,
+                ForeColor = CLR_TEXT_DIM, Font = FNT_SMALL,
+                AutoSize = true, Location = new Point(w - 350, 8),
+                BackColor = CLR_CARD, FlatStyle = FlatStyle.Flat
+            };
+            chkWordCallouts.CheckedChanged += (s, e) =>
+            {
+                if (_project != null) _project.WordIncludeCallouts = chkWordCallouts.Checked;
+                lblStatus.Text = $"ℹ️ Word 내보내기 시 콜아웃: {(chkWordCallouts.Checked ? "포함" : "미포함 (선명한 원본 유지)")}";
+            };
+            pnlImg.Controls.Add(chkWordCallouts);
 
             var chkShowCallouts = new CheckBox
             {
@@ -1196,33 +1285,38 @@ namespace AIAssistant
             var lblCtrl = new Label { Text = "🎛 컨트롤 설명 (Controls)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(0, 4), AutoSize = true };
             pnlCtrlHeader.Controls.Add(lblCtrl);
 
+            var btnMoveUp = CreateSmallBtn("▲ 위로", 65, 24, CLR_CARD_BORDER);
+            var btnMoveDown = CreateSmallBtn("▼ 아래로", 70, 24, CLR_CARD_BORDER);
             var btnImportVisible = CreateSmallBtn("💡 화면 컨트롤 추가", 125, 24, CLR_CARD_BORDER);
-            btnImportVisible.Location = new Point(w - 420, 2);
-            pnlCtrlHeader.Controls.Add(btnImportVisible);
+            var btnAddCtrl = CreateSmallBtn("➕ 항목 추가", 75, 24, CLR_CARD_BORDER);
+            var btnRenumber = CreateSmallBtn("🔢 번호 정렬", 80, 24, CLR_CARD_BORDER);
+            var btnDelCtrl = CreateSmallBtn("🗑 삭제", 60, 24, CLR_DANGER);
 
-            var btnAddCtrl = CreateSmallBtn("➕ 항목 추가", 80, 24, CLR_CARD_BORDER);
-            btnAddCtrl.Location = new Point(w - 290, 2);
-            pnlCtrlHeader.Controls.Add(btnAddCtrl);
+            int btnX = w - 485;
+            btnMoveUp.Location = new Point(btnX, 2); btnX += 68;
+            btnMoveDown.Location = new Point(btnX, 2); btnX += 73;
+            btnImportVisible.Location = new Point(btnX, 2); btnX += 128;
+            btnAddCtrl.Location = new Point(btnX, 2); btnX += 78;
+            btnRenumber.Location = new Point(btnX, 2); btnX += 83;
+            btnDelCtrl.Location = new Point(btnX, 2);
 
-            var btnRenumber = CreateSmallBtn("🔢 번호 자동정렬", 100, 24, CLR_CARD_BORDER);
-            btnRenumber.Location = new Point(w - 205, 2);
-            pnlCtrlHeader.Controls.Add(btnRenumber);
-
-            var btnDelCtrl = CreateSmallBtn("🗑 선택삭제", 80, 24, CLR_DANGER);
-            btnDelCtrl.Location = new Point(w - 100, 2);
-            pnlCtrlHeader.Controls.Add(btnDelCtrl);
+            pnlCtrlHeader.Controls.AddRange(new Control[] {
+                btnMoveUp, btnMoveDown, btnImportVisible, btnAddCtrl, btnRenumber, btnDelCtrl
+            });
 
             pnlViewDetail.Controls.Add(pnlCtrlHeader);
             y += pnlCtrlHeader.Height + 6;
 
             var grid = new DataGridView
             {
-                Location = new Point(12, y), Width = w, Height = 170,
+                Location = new Point(12, y), Width = w, Height = 175,
                 BackgroundColor = CLR_CARD, ForeColor = CLR_TEXT,
                 GridColor = CLR_CARD_BORDER, BorderStyle = BorderStyle.None,
                 RowHeadersVisible = false, AllowUserToAddRows = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                EnableHeadersVisualStyles = false
+                EnableHeadersVisualStyles = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false
             };
             grid.ColumnHeadersDefaultCellStyle.BackColor = CLR_TOOLBAR;
             grid.ColumnHeadersDefaultCellStyle.ForeColor = CLR_TEXT;
@@ -1231,24 +1325,213 @@ namespace AIAssistant
             grid.DefaultCellStyle.SelectionBackColor = CLR_CARD_HOVER;
             grid.DefaultCellStyle.SelectionForeColor = Color.White;
 
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "번호", DataPropertyName = "Callout", Width = 55, FillWeight = 15 });
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "컨트롤 이름", DataPropertyName = "Name", Width = 150, FillWeight = 35 });
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "기능 / 사용 조건", DataPropertyName = "Description", FillWeight = 50 });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "번호", DataPropertyName = "Callout", Width = 55, FillWeight = 12 });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "컨트롤 이름", DataPropertyName = "Name", Width = 150, FillWeight = 30 });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "기능 / 사용 조건", DataPropertyName = "Description", FillWeight = 58 });
 
             var bindingList = new System.ComponentModel.BindingList<ControlDesc>(page.Controls);
             grid.DataSource = bindingList;
 
-            // Real-time synchronization: when user edits Callout number, Name, or Description:
+            // ── Selected Control Detail Card (Dedicated multiline inspector) ──
+            int cardEditH = 120;
+            var pnlCardEdit = new Panel
+            {
+                Location = new Point(12, y + grid.Height + 8), Width = w, Height = cardEditH,
+                BackColor = CLR_CARD
+            };
+            pnlCardEdit.Paint += (s, e) => PaintCardBorder(e.Graphics, pnlCardEdit, CLR_CARD_BORDER, 1);
+
+            var lblCardTitle = new Label
+            {
+                Text = "📌 선택한 컨트롤 상세 편집",
+                Font = FNT_TITLE, ForeColor = CLR_ACCENT,
+                Location = new Point(12, 8), AutoSize = true
+            };
+            pnlCardEdit.Controls.Add(lblCardTitle);
+
+            var lblCardInfo = new Label
+            {
+                Text = "",
+                Font = FNT_SMALL, ForeColor = CLR_TEXT_DIM,
+                Location = new Point(230, 10), AutoSize = true
+            };
+            pnlCardEdit.Controls.Add(lblCardInfo);
+
+            int yC1 = 34;
+            var chkHasCallout = new CheckBox
+            {
+                Text = "콜아웃 번호:", Checked = false,
+                ForeColor = CLR_TEXT, Font = FNT_SMALL,
+                Location = new Point(12, yC1 + 2), AutoSize = true,
+                BackColor = CLR_CARD, FlatStyle = FlatStyle.Flat
+            };
+            pnlCardEdit.Controls.Add(chkHasCallout);
+
+            var numCallout = new NumericUpDown
+            {
+                Location = new Point(115, yC1), Width = 55, Height = 22,
+                Minimum = 1, Maximum = 999, Value = 1,
+                BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                BorderStyle = BorderStyle.FixedSingle, Font = FNT_SMALL
+            };
+            pnlCardEdit.Controls.Add(numCallout);
+
+            var lblName = new Label
+            {
+                Text = "컨트롤 이름:",
+                Font = FNT_SMALL, ForeColor = CLR_TEXT,
+                Location = new Point(185, yC1 + 3), AutoSize = true
+            };
+            pnlCardEdit.Controls.Add(lblName);
+
+            var txtName = new TextBox
+            {
+                Location = new Point(265, yC1), Width = 180, Height = 22,
+                BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                BorderStyle = BorderStyle.FixedSingle, Font = FNT_BODY
+            };
+            pnlCardEdit.Controls.Add(txtName);
+
+            var lblElId = new Label
+            {
+                Text = "",
+                Font = FNT_SMALL, ForeColor = CLR_TEXT_DIM,
+                Location = new Point(455, yC1 + 3), AutoSize = true
+            };
+            pnlCardEdit.Controls.Add(lblElId);
+
+            int yC2 = 64;
+            var lblDesc = new Label
+            {
+                Text = "기능 설명:",
+                Font = FNT_SMALL, ForeColor = CLR_TEXT,
+                Location = new Point(12, yC2 + 2), AutoSize = true
+            };
+            pnlCardEdit.Controls.Add(lblDesc);
+
+            var txtDesc = new TextBox
+            {
+                Location = new Point(115, yC2), Width = w - 130, Height = 48,
+                Multiline = true, ScrollBars = ScrollBars.Vertical,
+                BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                BorderStyle = BorderStyle.FixedSingle, Font = FNT_BODY
+            };
+            pnlCardEdit.Controls.Add(txtDesc);
+
+            // Real-time synchronization
             Action syncAndRefresh = () =>
             {
                 page.SyncCalloutsFromControls();
                 refreshPic();
             };
 
-            grid.CellEndEdit += (s, e) => syncAndRefresh();
-            grid.CellValueChanged += (s, e) => syncAndRefresh();
-            grid.RowsRemoved += (s, e) => syncAndRefresh();
+            bool updatingCard = false;
+            Action updateCardFromSelection = () =>
+            {
+                if (updatingCard) return;
+                updatingCard = true;
+                try
+                {
+                    if (grid.CurrentRow != null && grid.CurrentRow.Index >= 0 && grid.CurrentRow.Index < page.Controls.Count)
+                    {
+                        var c = page.Controls[grid.CurrentRow.Index];
+                        pnlCardEdit.Enabled = true;
+                        lblCardTitle.Text = $"📌 컨트롤 #{c.Callout?.ToString() ?? "-"} 편집: {c.Name}";
+                        lblCardInfo.Text = !string.IsNullOrEmpty(c.ElementId) ? $"UIA: {c.ElementId}" : "";
+                        chkHasCallout.Checked = c.Callout.HasValue;
+                        numCallout.Enabled = c.Callout.HasValue;
+                        numCallout.Value = c.Callout.HasValue ? Math.Max(1, Math.Min(999, c.Callout.Value)) : 1;
+                        txtName.Text = c.Name ?? "";
+                        txtDesc.Text = c.Description ?? "";
+                        lblElId.Text = !string.IsNullOrEmpty(c.ElementId) ? $"ID: {Trunc(c.ElementId, 28)}" : "";
+                    }
+                    else
+                    {
+                        pnlCardEdit.Enabled = false;
+                        lblCardTitle.Text = "📌 컨트롤을 목록에서 선택하세요";
+                        lblCardInfo.Text = "";
+                        chkHasCallout.Checked = false;
+                        numCallout.Value = 1;
+                        numCallout.Enabled = false;
+                        txtName.Text = "";
+                        txtDesc.Text = "";
+                        lblElId.Text = "";
+                    }
+                }
+                finally { updatingCard = false; }
+            };
+
+            grid.SelectionChanged += (s, e) => updateCardFromSelection();
+            grid.CellEndEdit += (s, e) => { syncAndRefresh(); updateCardFromSelection(); };
+            grid.CellValueChanged += (s, e) => { syncAndRefresh(); updateCardFromSelection(); };
+            grid.RowsRemoved += (s, e) => { syncAndRefresh(); updateCardFromSelection(); };
             grid.DataError += (s, e) => { e.ThrowException = false; e.Cancel = false; };
+
+            chkHasCallout.CheckedChanged += (s, e) =>
+            {
+                if (updatingCard || grid.CurrentRow == null || grid.CurrentRow.Index >= page.Controls.Count) return;
+                var c = page.Controls[grid.CurrentRow.Index];
+                if (chkHasCallout.Checked)
+                {
+                    numCallout.Enabled = true;
+                    int next = page.NextCalloutNumber();
+                    page.SetControlNumber(c, next);
+                    numCallout.Value = next;
+                }
+                else
+                {
+                    numCallout.Enabled = false;
+                    page.SetControlNumber(c, null);
+                }
+                bindingList.ResetBindings();
+                syncAndRefresh();
+                updateCardFromSelection();
+            };
+
+            numCallout.ValueChanged += (s, e) =>
+            {
+                if (updatingCard || grid.CurrentRow == null || !chkHasCallout.Checked || grid.CurrentRow.Index >= page.Controls.Count) return;
+                var c = page.Controls[grid.CurrentRow.Index];
+                int val = (int)numCallout.Value;
+                page.SetControlNumber(c, val > 0 ? (int?)val : null);
+                bindingList.ResetBindings();
+                syncAndRefresh();
+            };
+
+            txtName.TextChanged += (s, e) =>
+            {
+                if (updatingCard || grid.CurrentRow == null || grid.CurrentRow.Index >= page.Controls.Count) return;
+                var c = page.Controls[grid.CurrentRow.Index];
+                c.Name = txtName.Text;
+                bindingList.ResetBindings();
+                syncAndRefresh();
+            };
+
+            txtDesc.TextChanged += (s, e) =>
+            {
+                if (updatingCard || grid.CurrentRow == null || grid.CurrentRow.Index >= page.Controls.Count) return;
+                var c = page.Controls[grid.CurrentRow.Index];
+                c.Description = txtDesc.Text;
+                bindingList.ResetBindings();
+            };
+
+            Action<int> moveRow = delta =>
+            {
+                if (grid.CurrentRow == null) return;
+                int curIdx = grid.CurrentRow.Index;
+                int newIdx = page.MoveControl(curIdx, delta);
+                bindingList.ResetBindings();
+                syncAndRefresh();
+                if (newIdx >= 0 && newIdx < grid.Rows.Count)
+                {
+                    grid.CurrentCell = grid.Rows[newIdx].Cells[0];
+                    grid.Rows[newIdx].Selected = true;
+                    updateCardFromSelection();
+                }
+            };
+
+            btnMoveUp.Click += (s, e) => moveRow(-1);
+            btnMoveDown.Click += (s, e) => moveRow(1);
 
             btnImportVisible.Click += (s, e) =>
             {
@@ -1286,23 +1569,30 @@ namespace AIAssistant
                     });
                 }
                 syncAndRefresh();
+                updateCardFromSelection();
                 lblStatus.Text = $"✅ 화면 컨트롤 {visibleControls.Count}개 추가 완료";
             };
 
             btnAddCtrl.Click += (s, e) =>
             {
-                int nextNum = page.Controls.Count > 0
-                    ? (page.Controls.Max(c => c.Callout ?? 0) + 1)
-                    : 1;
+                int nextNum = page.NextCalloutNumber();
                 bindingList.Add(new ControlDesc { Callout = nextNum, Name = "새 컨트롤", Description = "" });
                 syncAndRefresh();
+                if (grid.Rows.Count > 0)
+                {
+                    int last = grid.Rows.Count - 1;
+                    grid.CurrentCell = grid.Rows[last].Cells[0];
+                    grid.Rows[last].Selected = true;
+                }
+                updateCardFromSelection();
             };
 
             btnRenumber.Click += (s, e) =>
             {
                 page.RenumberControlsAndCallouts();
                 bindingList.ResetBindings();
-                refreshPic();
+                syncAndRefresh();
+                updateCardFromSelection();
             };
 
             btnDelCtrl.Click += (s, e) =>
@@ -1318,11 +1608,14 @@ namespace AIAssistant
                             bindingList.RemoveAt(idx);
                     }
                     syncAndRefresh();
+                    updateCardFromSelection();
                 }
             };
 
             pnlViewDetail.Controls.Add(grid);
-            y += grid.Height + 14;
+            pnlViewDetail.Controls.Add(pnlCardEdit);
+            y += grid.Height + cardEditH + 20;
+            updateCardFromSelection();
 
             // Procedures (사용 절차)
             var lblProc = new Label { Text = "📋 작업/사용 절차 (Procedures)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(12, y), AutoSize = true };
@@ -1444,7 +1737,7 @@ namespace AIAssistant
                     return;
                 }
 
-                var pagesToCap = _project.AllPages().Where(p => p.HasView && p.IsIncluded).ToList();
+                var pagesToCap = _project.IncludedPages().Where(p => p.HasView).ToList();
                 if (pagesToCap.Count == 0)
                 {
                     MessageBox.Show("접근할 View가 등록된 페이지가 없습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1561,7 +1854,7 @@ namespace AIAssistant
             // View-Centric mode
             if (cmbMode.SelectedIndex == 0 && _project != null)
             {
-                var pagesToGen = _project.AllPages().Where(p => p.IsIncluded && (p.HasScreenshot || p.HasSource)).ToList();
+                var pagesToGen = _project.IncludedPages().Where(p => p.HasScreenshot || p.HasSource).ToList();
                 if (pagesToGen.Count == 0)
                 {
                     MessageBox.Show("생성할 페이지가 없습니다. (캡처 또는 소스가 있는 페이지 필요)", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);

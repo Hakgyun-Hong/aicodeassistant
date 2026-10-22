@@ -46,28 +46,28 @@ namespace AIAssistant
                 string name = path[i];
                 bool isLeaf = i == path.Count - 1;
 
-                // Skip a group node if the next level is already reachable.
-                if (!isLeaf && FindTarget(pid, path[i + 1]) != null)
-                {
-                    log?.Invoke($"  ↳ '{name}' 건너뜀 (하위 메뉴가 이미 표시됨)");
-                    continue;
-                }
-
-                var el = FindTarget(pid, name);
+                // Look for target element with retry polling (waiting for animations or dynamic submenu loading)
+                var el = FindTargetWithRetry(pid, name, isLeaf ? 2000 : 1200);
                 if (el == null)
                 {
                     if (isLeaf)
                         return new Result { Success = false, Message = $"'{name}' 버튼을 대상 앱에서 찾지 못했습니다." };
-                    log?.Invoke($"  ↳ '{name}' 을(를) 찾지 못해 건너뜀");
+                    log?.Invoke($"  ↳ '{name}' (UI 요소 미발견 - 하위 메뉴로 계속 진행)");
                     continue;
                 }
 
                 string how = Activate(el);
                 if (how == null)
-                    return new Result { Success = false, Message = $"'{name}' 을(를) 클릭하지 못했습니다." };
+                {
+                    if (isLeaf)
+                        return new Result { Success = false, Message = $"'{name}' 을(를) 클릭하지 못했습니다." };
+                    log?.Invoke($"  ↳ '{name}' 클릭 실패 (하위 메뉴로 계속 진행)");
+                    continue;
+                }
 
                 log?.Invoke($"  ↳ '{name}' {how}");
-                Thread.Sleep(isLeaf ? Math.Max(200, leafDelayMs) : 450);
+                // Allow WPF UI to transition / render submenus
+                Thread.Sleep(isLeaf ? Math.Max(250, leafDelayMs) : 500);
             }
             return new Result { Success = true, Message = "OK" };
         }
@@ -170,7 +170,7 @@ namespace AIAssistant
 
                 // Switch to the tab
                 string act = Activate(tab);
-                Thread.Sleep(350); // wait for WPF tab transition and rendering
+                Thread.Sleep(450); // wait for WPF tab transition and rendering
 
                 // Find existing child page or create new
                 var childPage = parentPage.Children.FirstOrDefault(c => string.Equals(c.DisplayName, tabName, StringComparison.OrdinalIgnoreCase));
@@ -179,22 +179,75 @@ namespace AIAssistant
                     var path = new List<string>(parentPage.NavPath ?? new List<string>()) { tabName };
                     childPage = new ManualPage
                     {
-                        DisplayName  = tabName,
-                        ViewName     = parentPage.ViewName,
-                        ViewXamlPath = parentPage.ViewXamlPath,
+                        DisplayName   = tabName,
+                        ViewName      = parentPage.ViewName,
+                        ViewXamlPath  = parentPage.ViewXamlPath,
                         ViewModelPath = parentPage.ViewModelPath,
-                        IsHome       = false,
-                        Depth        = parentPage.Depth + 1,
-                        NavPath      = path,
-                        DetailLevel  = parentPage.DetailLevel
+                        IsHome        = false,
+                        Depth         = parentPage.Depth + 1,
+                        NavPath       = path,
+                        DetailLevel   = parentPage.DetailLevel,
+                        IsTabPage     = true,
+                        TabName       = tabName
                     };
                     parentPage.Children.Add(childPage);
                 }
+                else
+                {
+                    childPage.IsTabPage = true;
+                    childPage.TabName = tabName;
+                }
 
-                // Capture the tab sub-page
-                CaptureInto(childPage, mainHwnd, tempDir, menuNames, viewXamlText);
-                childPage.Status = PageStatus.Captured;
-                results.Add(childPage);
+                // Capture window and crop strictly to TabControl area
+                string tag = $"tab_{childPage.Id}_{DateTime.Now:HHmmssfff}";
+                var snap = UiInspector.CaptureWindowElements(mainHwnd, tempDir, tag);
+                if (snap != null && !string.IsNullOrEmpty(snap.ScreenshotPath))
+                {
+                    var tabArea = GetTabControlBounds(tab, snap.WindowRect);
+                    bool cropped = false;
+
+                    // If tabArea is valid and smaller than full window, crop screenshot to tabArea
+                    if (tabArea.Width >= 50 && tabArea.Height >= 50 &&
+                        (tabArea.Width < snap.WindowRect.Width * 0.98 || tabArea.Height < snap.WindowRect.Height * 0.98))
+                    {
+                        string cropPath = Path.Combine(tempDir, $"{tag}_crop.png");
+                        string finalImg = ScreenCaptureEngine.CropScreenshot(snap.ScreenshotPath, tabArea, snap.WindowRect, cropPath);
+                        if (!string.IsNullOrEmpty(finalImg) && File.Exists(finalImg))
+                        {
+                            childPage.ScreenshotPath = finalImg;
+                            childPage.WindowRect = tabArea;
+                            cropped = true;
+                        }
+                    }
+
+                    if (!cropped)
+                    {
+                        childPage.ScreenshotPath = snap.ScreenshotPath;
+                        childPage.WindowRect = snap.WindowRect;
+                    }
+
+                    childPage.CapturedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+
+                    // Filter elements to tabArea if cropped, otherwise window
+                    var area = childPage.WindowRect;
+                    childPage.Elements = snap.Elements
+                        .Where(e => e.BoundingRectangle.Width >= 4 && e.BoundingRectangle.Height >= 4)
+                        .Where(e =>
+                        {
+                            if (!cropped) return true;
+                            var r = e.BoundingRectangle;
+                            return r.X >= area.X - 5 && r.Y >= area.Y - 5 &&
+                                   (r.X + r.Width) <= (area.X + area.Width + 5) &&
+                                   (r.Y + r.Height) <= (area.Y + area.Height + 5);
+                        })
+                        .Select(ElementLite.From).ToList();
+
+                    var oldCallouts = childPage.Callouts;
+                    childPage.Callouts = CalloutPlanner.Suggest(childPage.Elements, menuNames, viewXamlText, childPage.WindowRect, childPage.DetailLevel);
+                    CalloutPlanner.SyncControlsAfterRecapture(childPage, oldCallouts);
+                    childPage.Status = PageStatus.Captured;
+                    results.Add(childPage);
+                }
             }
 
             // Switch back to the first tab for clean state
@@ -206,7 +259,58 @@ namespace AIAssistant
             return results;
         }
 
+        /// <summary>
+        /// Locates the TabControl container for a TabItem to crop the tab's screenshot cleanly.
+        /// </summary>
+        public static System.Windows.Rect GetTabControlBounds(AutomationElement tab, System.Windows.Rect fallbackRect)
+        {
+            if (tab == null) return fallbackRect;
+            try
+            {
+                var walker = TreeWalker.ControlViewWalker;
+                var cur = tab;
+                for (int i = 0; i < 5 && cur != null; i++)
+                {
+                    var p = walker.GetParent(cur);
+                    if (p == null) break;
+                    try
+                    {
+                        if (Equals(p.Current.ControlType, ControlType.Tab))
+                        {
+                            var r = p.Current.BoundingRectangle;
+                            if (r.Width > 50 && r.Height > 50) return r;
+                        }
+                    }
+                    catch { }
+                    cur = p;
+                }
+            }
+            catch { }
+
+            try
+            {
+                var r = tab.Current.BoundingRectangle;
+                if (r.Width > 50 && r.Height > 50) return r;
+            }
+            catch { }
+
+            return fallbackRect;
+        }
+
         // ─── Element search ─────────────────────────────────────────────────
+
+        /// <summary>Finds a target element with retry polling (waiting for animations or dynamic submenu loading).</summary>
+        public static AutomationElement FindTargetWithRetry(int pid, string name, int timeoutMs = 1800, int intervalMs = 200)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            do
+            {
+                var el = FindTarget(pid, name);
+                if (el != null) return el;
+                Thread.Sleep(intervalMs);
+            } while (sw.ElapsedMilliseconds < timeoutMs);
+            return null;
+        }
 
         private static AutomationElement FindTarget(int pid, string name)
         {

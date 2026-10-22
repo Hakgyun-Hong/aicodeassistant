@@ -87,6 +87,48 @@ namespace AIAssistant
             }
         }
 
+        /// <summary>
+        /// Crops a sub-region (in screen coordinates) from the window screenshot.
+        /// Handles DPI scaling between logical screen coordinates and physical image pixels.
+        /// </summary>
+        public static string CropScreenshot(string srcPath, System.Windows.Rect cropScreenRect, System.Windows.Rect windowRect, string destPath)
+        {
+            if (string.IsNullOrEmpty(srcPath) || !File.Exists(srcPath)) return srcPath;
+            if (cropScreenRect.Width < 10 || cropScreenRect.Height < 10) return srcPath;
+
+            try
+            {
+                using (var src = Image.FromFile(srcPath) as Bitmap)
+                {
+                    if (src == null) return srcPath;
+
+                    double scaleX = src.Width / Math.Max(1.0, windowRect.Width);
+                    double scaleY = src.Height / Math.Max(1.0, windowRect.Height);
+                    if (scaleX < 0.5 || scaleX > 4.0) scaleX = 1.0;
+                    if (scaleY < 0.5 || scaleY > 4.0) scaleY = 1.0;
+
+                    int relX = (int)Math.Max(0, (cropScreenRect.X - windowRect.X) * scaleX);
+                    int relY = (int)Math.Max(0, (cropScreenRect.Y - windowRect.Y) * scaleY);
+                    int cropW = (int)Math.Min(src.Width - relX, cropScreenRect.Width * scaleX);
+                    int cropH = (int)Math.Min(src.Height - relY, cropScreenRect.Height * scaleY);
+
+                    if (cropW <= 20 || cropH <= 20) return srcPath;
+
+                    var cropArea = new Rectangle(relX, relY, cropW, cropH);
+                    using (var cropped = src.Clone(cropArea, src.PixelFormat))
+                    {
+                        cropped.Save(destPath, ImageFormat.Png);
+                    }
+                    return destPath;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"CropScreenshot failed: {ex.Message}");
+                return srcPath;
+            }
+        }
+
         public static Rectangle GetPhysicalWindowBounds(IntPtr hwnd)
         {
             try

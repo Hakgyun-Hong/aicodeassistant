@@ -39,7 +39,7 @@ namespace AIAssistant
         private static string BuildHtml(ManualProject project, string outputPath, bool embedImages)
         {
             var sb = new StringBuilder();
-            var allPages = project.AllPages().Where(p => p.IsIncluded).ToList();
+            var allPages = project.IncludedPages().ToList();
 
             sb.AppendLine("<!DOCTYPE html>");
             sb.AppendLine("<html lang=\"ko\">");

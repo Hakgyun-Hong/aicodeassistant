@@ -112,6 +112,10 @@ namespace AIAssistant
         [DataMember] public bool   IsIncluded  { get; set; } = true;
         [DataMember] public List<ManualPage> Children { get; set; } = new List<ManualPage>();
 
+        // ── Tab sub-page (discovered by crawling visible TabItems inside the parent View) ──
+        [DataMember] public bool   IsTabPage   { get; set; }
+        [DataMember] public string TabName     { get; set; }
+
         // ── Source (resolved via PrismViewResolver, user-overridable) ──
         [DataMember] public string ViewTypeName      { get; set; }
         [DataMember] public string ViewXamlPath      { get; set; }
@@ -187,8 +191,11 @@ namespace AIAssistant
             if (Controls == null) Controls = new List<ControlDesc>();
             if (Callouts == null) Callouts = new List<PageCallout>();
 
-            var calloutByEl = Callouts.Where(c => !string.IsNullOrEmpty(c.ElementId))
-                                      .ToDictionary(c => c.ElementId, c => c);
+            // NOTE: several callouts/controls may legitimately share an ElementId (LLM duplicates,
+            // user-added rows, nested UIA elements). Never use ToDictionary here.
+            var calloutsByEl = Callouts.Where(c => !string.IsNullOrEmpty(c.ElementId))
+                                       .GroupBy(c => c.ElementId)
+                                       .ToDictionary(g => g.Key, g => g.ToList());
 
             var updatedCallouts = new List<PageCallout>();
             var usedCallouts = new HashSet<PageCallout>();
@@ -198,11 +205,11 @@ namespace AIAssistant
                 if (!ctrl.Callout.HasValue || ctrl.Callout.Value <= 0) continue;
                 int newNum = ctrl.Callout.Value;
 
-                // 1. Try finding callout by ElementId
+                // 1. Try finding callout by ElementId (first one not yet claimed)
                 PageCallout target = null;
-                if (!string.IsNullOrEmpty(ctrl.ElementId) && calloutByEl.TryGetValue(ctrl.ElementId, out var byEl))
+                if (!string.IsNullOrEmpty(ctrl.ElementId) && calloutsByEl.TryGetValue(ctrl.ElementId, out var byEl))
                 {
-                    target = byEl;
+                    target = byEl.FirstOrDefault(c => !usedCallouts.Contains(c));
                 }
 
                 // 2. Try finding callout by Label matching ctrl.Name
@@ -252,6 +259,71 @@ namespace AIAssistant
             Callouts = updatedCallouts;
         }
 
+        // ── Editing helpers (used by ControlListEditor) ──
+
+        /// <summary>Next free callout number.</summary>
+        public int NextCalloutNumber() =>
+            (Controls.Where(c => c.Callout.HasValue).Select(c => c.Callout.Value).DefaultIfEmpty(0).Max()) + 1;
+
+        /// <summary>
+        /// Assign a callout number to a control. If another control already uses it, the two numbers are
+        /// swapped so numbering never collides.
+        /// </summary>
+        public void SetControlNumber(ControlDesc ctrl, int? number)
+        {
+            if (ctrl == null) return;
+            if (number.HasValue && number.Value <= 0) number = null;
+            if (number.HasValue)
+            {
+                var other = Controls.FirstOrDefault(c => !ReferenceEquals(c, ctrl) && c.Callout == number);
+                if (other != null) other.Callout = ctrl.Callout;
+            }
+            ctrl.Callout = number;
+            SyncCalloutsFromControls();
+        }
+
+        /// <summary>Move a control row up/down. Callout numbers follow the row order (swap).</summary>
+        public int MoveControl(int index, int delta)
+        {
+            int target = index + delta;
+            if (index < 0 || index >= Controls.Count || target < 0 || target >= Controls.Count) return index;
+            var a = Controls[index];
+            var b = Controls[target];
+            Controls[index] = b;
+            Controls[target] = a;
+            if (a.Callout.HasValue && b.Callout.HasValue)
+            {
+                int t = a.Callout.Value; a.Callout = b.Callout; b.Callout = t;
+            }
+            SyncCalloutsFromControls();
+            return target;
+        }
+
+        /// <summary>Add a control row (+ callout) for a captured UI element. Returns the existing row if already present.</summary>
+        public ControlDesc AddControlForElement(ElementLite el, bool withCallout = true)
+        {
+            if (el == null) return null;
+            var existing = Controls.FirstOrDefault(c => c.ElementId == el.Id);
+            if (existing != null) return existing;
+
+            var ctrl = new ControlDesc
+            {
+                Callout     = withCallout ? (int?)NextCalloutNumber() : null,
+                Name        = el.DisplayLabel,
+                Description = el.IsEnabled ? "" : "(조건 충족 시 활성화)",
+                ElementId   = el.Id
+            };
+            Controls.Add(ctrl);
+            if (ctrl.Callout.HasValue)
+                Callouts.Add(new PageCallout
+                {
+                    Number = ctrl.Callout.Value, ElementId = el.Id, Label = ctrl.Name,
+                    X = el.X, Y = el.Y, W = el.W, H = el.H
+                });
+            SyncCalloutsFromControls();
+            return ctrl;
+        }
+
         /// <summary>
         /// Renumbers controls and callouts sequentially (1, 2, 3...) in reading/table order.
         /// </summary>
@@ -297,6 +369,10 @@ namespace AIAssistant
         [DataMember] public string UiXmlPath   { get; set; }
         [DataMember] public string SourceRoot  { get; set; }
         [DataMember] public int    NavDelayMs  { get; set; } = 1200;
+        /// <summary>Draw numbered callouts on screenshots in the Word export (off by default: cleaner images).</summary>
+        [DataMember] public bool   WordIncludeCallouts { get; set; }
+        /// <summary>Crawl visible TabItems inside each View into tab sub-pages during capture.</summary>
+        [DataMember] public bool   CrawlTabs   { get; set; } = true;
         [DataMember] public string CreatedAt   { get; set; } = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
         [DataMember] public List<ManualPage> Roots { get; set; } = new List<ManualPage>();
 
@@ -313,6 +389,27 @@ namespace AIAssistant
                 for (int i = p.Children.Count - 1; i >= 0; i--)
                     stack.Push(p.Children[i]);
             }
+        }
+
+        /// <summary>Pages that are effectively included (page AND all ancestors are checked).</summary>
+        public IEnumerable<ManualPage> IncludedPages()
+        {
+            var stack = new Stack<ManualPage>(Enumerable.Reverse(Roots.Where(r => r.IsIncluded)));
+            while (stack.Count > 0)
+            {
+                var p = stack.Pop();
+                yield return p;
+                for (int i = p.Children.Count - 1; i >= 0; i--)
+                    if (p.Children[i].IsIncluded) stack.Push(p.Children[i]);
+            }
+        }
+
+        /// <summary>Parent of a page (null for roots).</summary>
+        public ManualPage FindParent(ManualPage child)
+        {
+            foreach (var p in AllPages())
+                if (p.Children.Contains(child)) return p;
+            return null;
         }
 
         /// <summary>All menu display names — used to filter global navigation chrome from callouts.</summary>
