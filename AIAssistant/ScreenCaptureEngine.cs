@@ -9,16 +9,31 @@ using System.Runtime.InteropServices;
 namespace AIAssistant
 {
     /// <summary>
+    /// Temporary highlight overlay on top of screenshot preview (e.g. mouse hover over a control candidate).
+    /// </summary>
+    public sealed class HighlightOverlay
+    {
+        public System.Windows.Rect Rect { get; set; }
+        public string Label { get; set; }
+        public int? CalloutNumber { get; set; }
+        public Color FillColor { get; set; } = Color.FromArgb(70, 56, 189, 248);
+        public Color BorderColor { get; set; } = Color.FromArgb(245, 158, 11);
+
+        public HighlightOverlay() { }
+
+        public HighlightOverlay(System.Windows.Rect rect, string label = null, int? calloutNumber = null, Color? fillColor = null, Color? borderColor = null)
+        {
+            Rect = rect;
+            Label = label;
+            CalloutNumber = calloutNumber;
+            if (fillColor.HasValue) FillColor = fillColor.Value;
+            if (borderColor.HasValue) BorderColor = borderColor.Value;
+        }
+    }
+
+    /// <summary>
     /// Captures a WPF window using PrintWindow (works for layered/DPI-aware windows)
     /// and overlays numbered callout bubbles on top of each UI element's BoundingRectangle.
-    ///
-    /// DPI handling:
-    ///   UI Automation BoundingRectangle returns physical screen pixels on Windows 8.1+.
-    ///   We capture the window at its native size, so we subtract the window origin
-    ///   (windowRect.Left / Top) to get relative coordinates inside the captured image.
-    ///
-    /// For multi-monitor DPI scenarios we additionally apply the per-window DPI scale
-    /// so that the callout boxes align correctly even at 125% / 150% magnification.
     /// </summary>
     public static class ScreenCaptureEngine
     {
@@ -226,14 +241,14 @@ namespace AIAssistant
 
         /// <summary>
         /// Returns an in-memory annotated Bitmap (no file I/O).
-        /// Used by ManualEditorPanel for dynamic callout editing preview.
-        /// If callouts is null or empty, returns a clean copy of the raw screenshot.
+        /// Used by ManualEditorPanel for dynamic callout editing preview and hover highlights.
         /// </summary>
         public static Bitmap RenderAnnotatedBitmap(
             string rawScreenshotPath,
             List<CalloutItem> callouts,
             System.Windows.Rect windowRect,
-            bool showCallouts)
+            bool showCallouts,
+            HighlightOverlay highlight = null)
         {
             if (string.IsNullOrEmpty(rawScreenshotPath) || !File.Exists(rawScreenshotPath))
                 return null;
@@ -246,9 +261,6 @@ namespace AIAssistant
 
                     var result = new Bitmap(src);
 
-                    if (!showCallouts || callouts == null || callouts.Count == 0)
-                        return result;
-
                     double dpiX = result.Width  / Math.Max(1, windowRect.Width);
                     double dpiY = result.Height / Math.Max(1, windowRect.Height);
                     if (dpiX < 0.5 || dpiX > 4.0) dpiX = 1.0;
@@ -259,8 +271,16 @@ namespace AIAssistant
                         g.SmoothingMode     = SmoothingMode.AntiAlias;
                         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-                        foreach (var callout in callouts)
-                            DrawCallout(g, callout, windowRect, dpiX, dpiY);
+                        if (showCallouts && callouts != null && callouts.Count > 0)
+                        {
+                            foreach (var callout in callouts)
+                                DrawCallout(g, callout, windowRect, dpiX, dpiY);
+                        }
+
+                        if (highlight != null && highlight.Rect.Width > 0 && highlight.Rect.Height > 0)
+                        {
+                            DrawHighlight(g, highlight, windowRect, dpiX, dpiY);
+                        }
                     }
 
                     return result;
@@ -333,6 +353,80 @@ namespace AIAssistant
                     LineAlignment = StringAlignment.Center
                 };
                 g.DrawString(callout.Number.ToString(), font, textBrush, bubbleRect, sf);
+            }
+        }
+
+        private static void DrawHighlight(
+            Graphics g, HighlightOverlay highlight,
+            System.Windows.Rect windowRect,
+            double dpiX, double dpiY)
+        {
+            float imgX = (float)((highlight.Rect.Left - windowRect.Left) * dpiX);
+            float imgY = (float)((highlight.Rect.Top  - windowRect.Top ) * dpiY);
+            float imgW = (float)(highlight.Rect.Width  * dpiX);
+            float imgH = (float)(highlight.Rect.Height * dpiY);
+
+            if (imgW < 2 || imgH < 2) return;
+
+            // 1. Luminous semi-transparent fill
+            using (var fillBrush = new SolidBrush(highlight.FillColor))
+                g.FillRectangle(fillBrush, imgX, imgY, imgW, imgH);
+
+            // 2. Bold glowing outline border (2.5px Amber / Cyan)
+            using (var borderPen = new Pen(highlight.BorderColor, 2.5f))
+            {
+                borderPen.DashStyle = DashStyle.Solid;
+                g.DrawRectangle(borderPen, imgX, imgY, imgW, imgH);
+            }
+
+            // 3. Highlight Pill Badge / Callout Bubble
+            if (highlight.CalloutNumber.HasValue)
+            {
+                const float BUBBLE_SIZE = 24f;
+                float bx = imgX + 2;
+                float by = imgY - BUBBLE_SIZE / 2 - 1;
+                if (by < 0) by = imgY + 1;
+
+                var bubbleRect = new RectangleF(bx, by, BUBBLE_SIZE, BUBBLE_SIZE);
+                using (var bubbleBrush = new SolidBrush(highlight.BorderColor))
+                    g.FillEllipse(bubbleBrush, bubbleRect);
+
+                using (var borderPen = new Pen(Color.White, 2f))
+                    g.DrawEllipse(borderPen, bubbleRect);
+
+                using (var font = new Font("Arial", 9.5f, FontStyle.Bold))
+                using (var textBrush = new SolidBrush(Color.White))
+                {
+                    var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    g.DrawString(highlight.CalloutNumber.Value.ToString(), font, textBrush, bubbleRect, sf);
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(highlight.Label))
+            {
+                using (var font = new Font("Segoe UI", 9f, FontStyle.Bold))
+                {
+                    string text = highlight.Label.Trim();
+                    if (text.Length > 20) text = text.Substring(0, 18) + "..";
+                    var sz = g.MeasureString(text, font);
+                    float pillW = sz.Width + 14;
+                    float pillH = Math.Max(20, sz.Height + 4);
+                    float px = imgX + 2;
+                    float py = imgY - pillH - 2;
+                    if (py < 0) py = imgY + 2;
+
+                    var pillRect = new RectangleF(px, py, pillW, pillH);
+                    using (var pillBrush = new SolidBrush(Color.FromArgb(230, 20, 24, 33)))
+                        g.FillRectangle(pillBrush, pillRect);
+
+                    using (var pillPen = new Pen(highlight.BorderColor, 1.5f))
+                        g.DrawRectangle(pillPen, px, py, pillW, pillH);
+
+                    using (var textBrush = new SolidBrush(Color.White))
+                    {
+                        var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                        g.DrawString(text, font, textBrush, pillRect, sf);
+                    }
+                }
             }
         }
 

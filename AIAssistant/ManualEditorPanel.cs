@@ -56,7 +56,7 @@ namespace AIAssistant
         private Label               lblStatus;
         private ProgressBar         progressBar;
         private ComboBox            cmbProcess;
-        private ComboBox            cmbMode;
+        private bool                _showCandidateDrawer = false;
 
         // ─── State ────────────────────────────────────────────────────────
         private ManualDocument          _document;
@@ -115,19 +115,9 @@ namespace AIAssistant
                 AutoScroll = true
             };
 
-            // Mode
-            AddLabel(pnlToolbar, "Mode", 4);
-            cmbMode = CreateCombo(185);
-            cmbMode.Items.AddRange(new object[] { "📋 UI XML (View 단위)", "📸 Current Screen", "🌐 Full App (Auto-Crawl)" });
-            cmbMode.SelectedIndex = 0;
-            cmbMode.SelectedIndexChanged += (s, e) => OnModeChanged();
-            pnlToolbar.Controls.Add(cmbMode);
-
-            AddSpacer(pnlToolbar, 8);
-
             // Target process
             AddLabel(pnlToolbar, "Target", 4);
-            cmbProcess = CreateCombo(200);
+            cmbProcess = CreateCombo(220);
             pnlToolbar.Controls.Add(cmbProcess);
 
             var btnRefresh = CreateIconBtn("🔄", "Refresh Processes", CLR_CARD);
@@ -758,15 +748,13 @@ namespace AIAssistant
             {
                 "📖  WPF Auto Manual Generator",
                 "",
-                "【📋 UI XML (View 단위) 모드】",
+                "【📋 WPF 매뉴얼 제작 가이드】",
                 "1.  📂 Open XML 버튼을 눌러 대상 프로그램의 UI 정의 XML을 엽니다.",
                 "2.  XML의 <Menu> 계층(DisplayName)과 Prism View/ViewModel 소스가 자동 매핑됩니다.",
                 "3.  좌측 메뉴 트리에서 원하는 페이지를 선택하거나, 📸 Capture로 등록된 View를 자동 방문·캡처합니다.",
                 "4.  ✨ Generate로 View XAML 및 ViewModel 코드를 바탕으로 LLM 매뉴얼을 작성합니다.",
-                "5.  우측 편집 패널에서 개요, 컨트롤 설명표, 절차, 주의사항을 수정한 후 📄 Export DOCX를 클릭하세요.",
-                "",
-                "【📸 직접 화면 캡처 모드】",
-                "Mode를 '📸 Current Screen' 또는 '🌐 Full App'으로 변경하여 실행 중인 창을 직접 캡처할 수도 있습니다."
+                "5.  우측 편집 패널에서 UIA 컨트롤 후보 탐색기(마우스 오버 시 화면 강조)를 활용해 컨트롤을 자유롭게 추가/편집하세요.",
+                "6.  개요, 컨트롤 설명표, 절차, 주의사항을 수정한 후 📄 Export DOCX를 클릭하세요."
             };
             int y = 20;
             foreach (var line in lines)
@@ -816,27 +804,14 @@ namespace AIAssistant
         //  ACTIONS
         // ═══════════════════════════════════════════════════════════════════
 
-        private void OnModeChanged()
+        private void RefreshProjectStatus()
         {
-            bool isXmlMode = cmbMode.SelectedIndex == 0;
-            splitMain.Visible = isXmlMode;
-            pnlCards.Visible = !isXmlMode;
-            FindBtn("btnOpenXml").Visible = isXmlMode;
-            FindBtn("btnSaveProj").Visible = isXmlMode;
-            FindBtn("btnLoadProj").Visible = isXmlMode;
-
-            if (isXmlMode)
-            {
-                lblStatus.Text = _project == null
-                    ? "📂 Open XML로 메뉴 XML 파일을 열거나 💾 프로젝트를 불러오세요."
-                    : $"📋 프로젝트: {_project.AllPages().Count()}개 페이지";
-                if (_project == null) ShowWelcomeCard();
-            }
-            else
-            {
-                lblStatus.Text = "WPF 앱을 실행 → Target 선택 → 📸 Capture";
-                if (_document == null) ShowWelcomeCard();
-            }
+            splitMain.Visible = true;
+            pnlCards.Visible = false;
+            lblStatus.Text = _project == null
+                ? "📂 Open XML로 메뉴 XML 파일을 열거나 💾 프로젝트를 불러오세요."
+                : $"📋 프로젝트: {_project.AllPages().Count()}개 페이지 (선택 포함: {_project.IncludedPages().Count()}개)";
+            if (_project == null) ShowWelcomeCard();
         }
 
         // ── XML & Project actions ──
@@ -1004,6 +979,17 @@ namespace AIAssistant
                 child.ForeColor = isChecked ? CLR_TEXT : CLR_TEXT_DIM;
                 SetChildrenChecked(child, isChecked);
             }
+        }
+
+        private sealed class CandidateRow
+        {
+            public ElementLite Element { get; set; }
+            public string Type => Element != null ? (Element.ControlType ?? "") : "";
+            public string Label => Element != null ? (Element.DisplayLabel ?? "") : "";
+            public string AutomationId => Element != null ? (Element.AutomationId ?? "") : "";
+            public string Status { get; set; }
+            public string Size => Element != null ? $"{(int)Element.W}×{(int)Element.H}" : "";
+            public bool IsRegistered { get; set; }
         }
 
         private void RenderViewDetail(ManualPage page)
@@ -1237,18 +1223,31 @@ namespace AIAssistant
                 BorderStyle = BorderStyle.None
             };
 
-            Action refreshPic = () =>
+            HighlightOverlay currentHighlight = null;
+            Action<HighlightOverlay> refreshPicWithHighlight = (hl) =>
             {
+                if (currentHighlight == null && hl == null) return;
+                if (currentHighlight != null && hl != null &&
+                    currentHighlight.Rect == hl.Rect &&
+                    currentHighlight.CalloutNumber == hl.CalloutNumber &&
+                    currentHighlight.BorderColor == hl.BorderColor)
+                {
+                    return;
+                }
+
+                currentHighlight = hl;
                 if (page.HasScreenshot)
                 {
                     var old = pic.Image;
                     pic.Image = ScreenCaptureEngine.RenderAnnotatedBitmap(
                         page.ScreenshotPath, page.ShowCallouts ? page.CalloutItems() : null,
-                        page.WindowRect, page.ShowCallouts);
+                        page.WindowRect, page.ShowCallouts, hl);
                     old?.Dispose();
                 }
                 else pic.Image = null;
             };
+
+            Action refreshPic = () => refreshPicWithHighlight(currentHighlight);
 
             chkShowCallouts.CheckedChanged += (s, e) =>
             {
@@ -1285,27 +1284,317 @@ namespace AIAssistant
             var lblCtrl = new Label { Text = "🎛 컨트롤 설명 (Controls)", Font = FNT_BODY, ForeColor = CLR_ACCENT, Location = new Point(0, 4), AutoSize = true };
             pnlCtrlHeader.Controls.Add(lblCtrl);
 
-            var btnMoveUp = CreateSmallBtn("▲ 위로", 65, 24, CLR_CARD_BORDER);
-            var btnMoveDown = CreateSmallBtn("▼ 아래로", 70, 24, CLR_CARD_BORDER);
-            var btnImportVisible = CreateSmallBtn("💡 화면 컨트롤 추가", 125, 24, CLR_CARD_BORDER);
-            var btnAddCtrl = CreateSmallBtn("➕ 항목 추가", 75, 24, CLR_CARD_BORDER);
-            var btnRenumber = CreateSmallBtn("🔢 번호 정렬", 80, 24, CLR_CARD_BORDER);
-            var btnDelCtrl = CreateSmallBtn("🗑 삭제", 60, 24, CLR_DANGER);
+            var btnToggleCand = CreateSmallBtn(
+                _showCandidateDrawer ? "▲ UIA 후보 닫기" : "🔍 UIA 후보 컨트롤 탐색/추가",
+                _showCandidateDrawer ? 125 : 190, 24,
+                _showCandidateDrawer ? CLR_ACCENT : Color.FromArgb(245, 158, 11));
+            btnToggleCand.ForeColor = Color.White;
+            btnToggleCand.Click += (s, e) =>
+            {
+                _showCandidateDrawer = !_showCandidateDrawer;
+                RenderViewDetail(page);
+            };
 
-            int btnX = w - 485;
-            btnMoveUp.Location = new Point(btnX, 2); btnX += 68;
-            btnMoveDown.Location = new Point(btnX, 2); btnX += 73;
-            btnImportVisible.Location = new Point(btnX, 2); btnX += 128;
-            btnAddCtrl.Location = new Point(btnX, 2); btnX += 78;
-            btnRenumber.Location = new Point(btnX, 2); btnX += 83;
+            var btnAddCtrl = CreateSmallBtn("➕ 직접 추가", 75, 24, CLR_CARD_BORDER);
+            var btnRenumber = CreateSmallBtn("🔢 번호 정렬", 80, 24, CLR_CARD_BORDER);
+            var btnMoveUp = CreateSmallBtn("▲", 32, 24, CLR_CARD_BORDER);
+            var btnMoveDown = CreateSmallBtn("▼", 32, 24, CLR_CARD_BORDER);
+            var btnDelCtrl = CreateSmallBtn("🗑 삭제", 55, 24, CLR_DANGER);
+
+            int totalBtnsW = btnToggleCand.Width + 75 + 80 + 32 + 32 + 55 + 25;
+            int btnX = Math.Max(180, w - totalBtnsW);
+            btnToggleCand.Location = new Point(btnX, 2); btnX += btnToggleCand.Width + 5;
+            btnAddCtrl.Location = new Point(btnX, 2); btnX += 80;
+            btnRenumber.Location = new Point(btnX, 2); btnX += 85;
+            btnMoveUp.Location = new Point(btnX, 2); btnX += 37;
+            btnMoveDown.Location = new Point(btnX, 2); btnX += 37;
             btnDelCtrl.Location = new Point(btnX, 2);
 
             pnlCtrlHeader.Controls.AddRange(new Control[] {
-                btnMoveUp, btnMoveDown, btnImportVisible, btnAddCtrl, btnRenumber, btnDelCtrl
+                btnToggleCand, btnAddCtrl, btnRenumber, btnMoveUp, btnMoveDown, btnDelCtrl
             });
 
             pnlViewDetail.Controls.Add(pnlCtrlHeader);
             y += pnlCtrlHeader.Height + 6;
+
+            var bindingList = new System.ComponentModel.BindingList<ControlDesc>(page.Controls);
+            Action updateCardFromSelection = null;
+            Action refreshCandidateGrid = null;
+
+            // ── UIA Candidate Controls Drawer ──
+            if (_showCandidateDrawer)
+            {
+                var pnlCandidates = new Panel
+                {
+                    Location = new Point(12, y), Width = w, Height = 230,
+                    BackColor = CLR_CARD
+                };
+                pnlCandidates.Paint += (s, e) => PaintCardBorder(e.Graphics, pnlCandidates, Color.FromArgb(245, 158, 11), 1);
+
+                if (page.Elements == null || page.Elements.Count == 0)
+                {
+                    var lblNoElements = new Label
+                    {
+                        Text = "ℹ️ 아직 수집된 UIA 컨트롤 트리가 없습니다.\n상단 툴바의 '📸 캡처'를 먼저 진행하면 대상 화면의 컨트롤(버튼, 입력창 등)이 자동으로 감지됩니다.",
+                        Font = FNT_BODY, ForeColor = CLR_TEXT_DIM,
+                        Location = new Point(16, 20), AutoSize = true
+                    };
+                    pnlCandidates.Controls.Add(lblNoElements);
+                    pnlCandidates.Height = 80;
+                }
+                else
+                {
+                    // Row 1: Title, Stats, and Batch Add Buttons
+                    var lblCandTitle = new Label
+                    {
+                        Text = "🔍 UIA 컨트롤 후보 (마우스 올리면 화면에 위치 표시)",
+                        Font = FNT_TITLE, ForeColor = Color.FromArgb(245, 158, 11),
+                        Location = new Point(12, 8), AutoSize = true
+                    };
+                    var lblCandStats = new Label
+                    {
+                        Text = "",
+                        Font = FNT_SMALL, ForeColor = CLR_TEXT_DIM,
+                        Location = new Point(365, 10), AutoSize = true
+                    };
+
+                    var btnAddSelCand = CreateSmallBtn("➕ 선택 등록", 85, 23, Color.FromArgb(245, 158, 11));
+                    btnAddSelCand.ForeColor = Color.Black;
+                    var btnAddAllCand = CreateSmallBtn("⚡ 미등록 일괄 등록", 130, 23, CLR_CARD_BORDER);
+
+                    btnAddAllCand.Location = new Point(w - 145, 6);
+                    btnAddSelCand.Location = new Point(w - 235, 6);
+
+                    pnlCandidates.Controls.AddRange(new Control[] { lblCandTitle, lblCandStats, btnAddSelCand, btnAddAllCand });
+
+                    // Row 2: Filters
+                    var lblFilter = new Label
+                    {
+                        Text = "필터:", Font = FNT_SMALL, ForeColor = CLR_TEXT_DIM,
+                        Location = new Point(12, 36), AutoSize = true
+                    };
+                    var txtSearchCand = new TextBox
+                    {
+                        Location = new Point(48, 33), Width = 150, Height = 22,
+                        BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                        BorderStyle = BorderStyle.FixedSingle, Font = FNT_SMALL
+                    };
+                    var cmbTypeFilter = new ComboBox
+                    {
+                        Location = new Point(206, 33), Width = 105, Height = 22,
+                        DropDownStyle = ComboBoxStyle.DropDownList,
+                        BackColor = CLR_INPUT, ForeColor = CLR_TEXT,
+                        FlatStyle = FlatStyle.Flat, Font = FNT_SMALL
+                    };
+                    cmbTypeFilter.Items.AddRange(new object[] {
+                        "전체 타입", "button", "edit", "comboBox", "checkBox", "tabItem", "dataGrid", "menuItem", "기타"
+                    });
+                    cmbTypeFilter.SelectedIndex = 0;
+
+                    var chkOnlyUnreg = new CheckBox
+                    {
+                        Text = "미등록만 보기", Checked = true,
+                        ForeColor = CLR_TEXT, Font = FNT_SMALL,
+                        Location = new Point(320, 34), AutoSize = true, BackColor = Color.Transparent
+                    };
+                    var chkOnlyVisible = new CheckBox
+                    {
+                        Text = "화면 표시 컨트롤만", Checked = true,
+                        ForeColor = CLR_TEXT_DIM, Font = FNT_SMALL,
+                        Location = new Point(430, 34), AutoSize = true, BackColor = Color.Transparent
+                    };
+
+                    pnlCandidates.Controls.AddRange(new Control[] { lblFilter, txtSearchCand, cmbTypeFilter, chkOnlyUnreg, chkOnlyVisible });
+
+                    // Row 3: Grid
+                    var gridCandidates = new DataGridView
+                    {
+                        Location = new Point(12, 60), Width = w - 24, Height = 155,
+                        BackgroundColor = CLR_CARD, ForeColor = CLR_TEXT,
+                        GridColor = CLR_CARD_BORDER, BorderStyle = BorderStyle.None,
+                        RowHeadersVisible = false, AllowUserToAddRows = false, ReadOnly = true,
+                        AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                        EnableHeadersVisualStyles = false,
+                        SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                        MultiSelect = true,
+                        AutoGenerateColumns = false
+                    };
+                    gridCandidates.ColumnHeadersDefaultCellStyle.BackColor = CLR_TOOLBAR;
+                    gridCandidates.ColumnHeadersDefaultCellStyle.ForeColor = CLR_TEXT;
+                    gridCandidates.DefaultCellStyle.BackColor = CLR_INPUT;
+                    gridCandidates.DefaultCellStyle.ForeColor = CLR_TEXT;
+                    gridCandidates.DefaultCellStyle.SelectionBackColor = Color.FromArgb(70, 50, 15);
+                    gridCandidates.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 230, 130);
+
+                    gridCandidates.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "종류", DataPropertyName = "Type", Width = 80, FillWeight = 15 });
+                    gridCandidates.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "표시 이름 / 라벨", DataPropertyName = "Label", Width = 160, FillWeight = 35 });
+                    gridCandidates.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "AutomationId", DataPropertyName = "AutomationId", Width = 120, FillWeight = 25 });
+                    gridCandidates.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "상태", DataPropertyName = "Status", Width = 95, FillWeight = 15 });
+                    gridCandidates.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "크기", DataPropertyName = "Size", Width = 70, FillWeight = 10 });
+
+                    pnlCandidates.Controls.Add(gridCandidates);
+
+                    var currentRows = new List<CandidateRow>();
+                    refreshCandidateGrid = () =>
+                    {
+                        string search = txtSearchCand.Text.Trim();
+                        string typeFilter = cmbTypeFilter.SelectedItem as string ?? "전체 타입";
+                        bool onlyUnreg = chkOnlyUnreg.Checked;
+                        bool onlyVis = chkOnlyVisible.Checked;
+
+                        var regIds = new HashSet<string>(page.Controls.Select(c => c.ElementId).Where(id => !string.IsNullOrEmpty(id)));
+                        var regNames = new HashSet<string>(page.Controls.Select(c => c.Name).Where(n => !string.IsNullOrWhiteSpace(n)), StringComparer.OrdinalIgnoreCase);
+
+                        var query = page.Elements.AsEnumerable();
+                        if (onlyVis) query = query.Where(el => el.IsVisible);
+
+                        query = query.Where(el => !CalloutPlanner.Chrome.Contains(el.Name ?? "") && !string.IsNullOrWhiteSpace(el.DisplayLabel));
+
+                        var list = new List<CandidateRow>();
+                        foreach (var el in query)
+                        {
+                            bool isReg = (!string.IsNullOrEmpty(el.Id) && regIds.Contains(el.Id)) ||
+                                         (!string.IsNullOrWhiteSpace(el.DisplayLabel) && regNames.Contains(el.DisplayLabel));
+
+                            if (onlyUnreg && isReg) continue;
+
+                            if (typeFilter != "전체 타입")
+                            {
+                                if (typeFilter == "기타")
+                                {
+                                    if (CalloutPlanner.InteractiveTypes.Contains(el.ControlType ?? "")) continue;
+                                }
+                                else if (!string.Equals(el.ControlType, typeFilter, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    continue;
+                                }
+                            }
+
+                            if (!string.IsNullOrEmpty(search))
+                            {
+                                bool mName = el.DisplayLabel != null && el.DisplayLabel.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0;
+                                bool mId = el.AutomationId != null && el.AutomationId.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0;
+                                bool mType = el.ControlType != null && el.ControlType.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0;
+                                if (!mName && !mId && !mType) continue;
+                            }
+
+                            var co = page.Callouts.FirstOrDefault(c => c.ElementId == el.Id);
+                            string statusText = isReg ? (co != null ? $"✅ 등록 (#{co.Number})" : "✅ 등록됨") : "미등록";
+
+                            list.Add(new CandidateRow
+                            {
+                                Element = el,
+                                Status = statusText,
+                                IsRegistered = isReg
+                            });
+                        }
+
+                        currentRows = list
+                            .OrderBy(r => r.IsRegistered ? 1 : 0)
+                            .ThenByDescending(r => CalloutPlanner.InteractiveTypes.Contains(r.Element.ControlType ?? "") ? 1 : 0)
+                            .ThenBy(r => (int)(r.Element.Y / 30))
+                            .ThenBy(r => r.Element.X)
+                            .ToList();
+
+                        gridCandidates.DataSource = new System.ComponentModel.BindingList<CandidateRow>(currentRows);
+
+                        int total = page.Elements.Count(e => !CalloutPlanner.Chrome.Contains(e.Name ?? "") && !string.IsNullOrWhiteSpace(e.DisplayLabel));
+                        int unregCount = page.Elements.Count(e => !regIds.Contains(e.Id) && !regNames.Contains(e.DisplayLabel));
+                        lblCandStats.Text = $"(후보 {currentRows.Count}개 / 총 {total}개, 미등록 {unregCount}개)";
+                    };
+
+                    txtSearchCand.TextChanged += (s, e) => refreshCandidateGrid();
+                    cmbTypeFilter.SelectedIndexChanged += (s, e) => refreshCandidateGrid();
+                    chkOnlyUnreg.CheckedChanged += (s, e) => refreshCandidateGrid();
+                    chkOnlyVisible.CheckedChanged += (s, e) => refreshCandidateGrid();
+
+                    gridCandidates.CellMouseEnter += (s, e) =>
+                    {
+                        if (e.RowIndex >= 0 && e.RowIndex < currentRows.Count)
+                        {
+                            var row = currentRows[e.RowIndex];
+                            var el = row.Element;
+                            var co = page.Callouts.FirstOrDefault(c => c.ElementId == el.Id);
+                            int? calloutNum = co != null ? (int?)co.Number : null;
+
+                            var hl = new HighlightOverlay(
+                                new System.Windows.Rect(el.X, el.Y, el.W, el.H),
+                                label: $"💡 [{el.ControlType}] {el.DisplayLabel}",
+                                calloutNumber: calloutNum,
+                                fillColor: Color.FromArgb(70, 245, 158, 11),
+                                borderColor: Color.FromArgb(245, 158, 11)
+                            );
+                            refreshPicWithHighlight(hl);
+                        }
+                    };
+                    gridCandidates.CellMouseLeave += (s, e) => refreshPicWithHighlight(null);
+                    gridCandidates.MouseLeave += (s, e) => refreshPicWithHighlight(null);
+
+                    Action<ElementLite> addCandidate = el =>
+                    {
+                        var ctrl = page.AddControlForElement(el, withCallout: true);
+                        bindingList.ResetBindings();
+                        page.SyncCalloutsFromControls();
+                        refreshPic();
+                        refreshCandidateGrid();
+                        updateCardFromSelection?.Invoke();
+                        lblStatus.Text = $"✅ '{el.DisplayLabel}' 컨트롤 추가 완료 (Callout #{ctrl.Callout?.ToString() ?? "-"})";
+                    };
+
+                    gridCandidates.CellDoubleClick += (s, e) =>
+                    {
+                        if (e.RowIndex >= 0 && e.RowIndex < currentRows.Count)
+                        {
+                            addCandidate(currentRows[e.RowIndex].Element);
+                        }
+                    };
+
+                    btnAddSelCand.Click += (s, e) =>
+                    {
+                        if (gridCandidates.SelectedRows.Count == 0) return;
+                        int count = 0;
+                        foreach (DataGridViewRow r in gridCandidates.SelectedRows)
+                        {
+                            if (r.Index >= 0 && r.Index < currentRows.Count)
+                            {
+                                page.AddControlForElement(currentRows[r.Index].Element, withCallout: true);
+                                count++;
+                            }
+                        }
+                        bindingList.ResetBindings();
+                        page.SyncCalloutsFromControls();
+                        refreshPic();
+                        refreshCandidateGrid();
+                        updateCardFromSelection?.Invoke();
+                        lblStatus.Text = $"✅ 선택한 컨트롤 {count}개 등록 완료";
+                    };
+
+                    btnAddAllCand.Click += (s, e) =>
+                    {
+                        var unreg = currentRows.Where(r => !r.IsRegistered).ToList();
+                        if (unreg.Count == 0)
+                        {
+                            lblStatus.Text = "ℹ️ 현재 필터 조건에 해당하는 미등록 컨트롤이 없습니다.";
+                            return;
+                        }
+                        foreach (var r in unreg)
+                        {
+                            page.AddControlForElement(r.Element, withCallout: true);
+                        }
+                        bindingList.ResetBindings();
+                        page.SyncCalloutsFromControls();
+                        refreshPic();
+                        refreshCandidateGrid();
+                        updateCardFromSelection?.Invoke();
+                        lblStatus.Text = $"✅ 미등록 컨트롤 {unreg.Count}개 일괄 등록 완료";
+                    };
+
+                    refreshCandidateGrid();
+                }
+
+                pnlViewDetail.Controls.Add(pnlCandidates);
+                y += pnlCandidates.Height + 10;
+            }
 
             var grid = new DataGridView
             {
@@ -1329,8 +1618,34 @@ namespace AIAssistant
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "컨트롤 이름", DataPropertyName = "Name", Width = 150, FillWeight = 30 });
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "기능 / 사용 조건", DataPropertyName = "Description", FillWeight = 58 });
 
-            var bindingList = new System.ComponentModel.BindingList<ControlDesc>(page.Controls);
             grid.DataSource = bindingList;
+
+            grid.CellMouseEnter += (s, e) =>
+            {
+                if (e.RowIndex >= 0 && e.RowIndex < page.Controls.Count)
+                {
+                    var ctrl = page.Controls[e.RowIndex];
+                    var co = page.Callouts.FirstOrDefault(c => c.Number == ctrl.Callout)
+                             ?? (string.IsNullOrEmpty(ctrl.ElementId) ? null : page.Callouts.FirstOrDefault(c => c.ElementId == ctrl.ElementId));
+                    var el = (string.IsNullOrEmpty(ctrl.ElementId) ? null : page.Elements?.FirstOrDefault(x => x.Id == ctrl.ElementId))
+                             ?? page.Elements?.FirstOrDefault(x => !string.IsNullOrEmpty(x.DisplayLabel) && string.Equals(x.DisplayLabel, ctrl.Name, StringComparison.OrdinalIgnoreCase));
+
+                    var rect = co != null ? co.Rect : (el != null ? el.Rect : System.Windows.Rect.Empty);
+                    if (rect.Width > 0 && rect.Height > 0)
+                    {
+                        var hl = new HighlightOverlay(
+                            rect,
+                            label: $"📌 #{ctrl.Callout?.ToString() ?? "-"} {ctrl.Name}",
+                            calloutNumber: ctrl.Callout,
+                            fillColor: Color.FromArgb(70, 56, 189, 248),
+                            borderColor: Color.FromArgb(56, 189, 248)
+                        );
+                        refreshPicWithHighlight(hl);
+                    }
+                }
+            };
+            grid.CellMouseLeave += (s, e) => refreshPicWithHighlight(null);
+            grid.MouseLeave += (s, e) => refreshPicWithHighlight(null);
 
             // ── Selected Control Detail Card (Dedicated multiline inspector) ──
             int cardEditH = 120;
@@ -1423,10 +1738,11 @@ namespace AIAssistant
             {
                 page.SyncCalloutsFromControls();
                 refreshPic();
+                refreshCandidateGrid?.Invoke();
             };
 
             bool updatingCard = false;
-            Action updateCardFromSelection = () =>
+            updateCardFromSelection = () =>
             {
                 if (updatingCard) return;
                 updatingCard = true;
@@ -1532,46 +1848,6 @@ namespace AIAssistant
 
             btnMoveUp.Click += (s, e) => moveRow(-1);
             btnMoveDown.Click += (s, e) => moveRow(1);
-
-            btnImportVisible.Click += (s, e) =>
-            {
-                if (page.Elements == null || page.Elements.Count == 0)
-                {
-                    lblStatus.Text = "ℹ️ 먼저 화면을 캡처해야 컨트롤을 분석할 수 있습니다.";
-                    return;
-                }
-                var existingNames = new HashSet<string>(page.Controls.Select(c => c.Name).Where(n => !string.IsNullOrEmpty(n)), StringComparer.OrdinalIgnoreCase);
-                var visibleControls = page.Elements
-                    .Where(el => el.IsVisible && CalloutPlanner.InteractiveTypes.Contains(el.ControlType ?? ""))
-                    .Where(el => !CalloutPlanner.Chrome.Contains(el.Name ?? "") && !string.IsNullOrWhiteSpace(el.DisplayLabel))
-                    .GroupBy(el => el.DisplayLabel)
-                    .Select(g => g.First())
-                    .Where(el => !existingNames.Contains(el.DisplayLabel))
-                    .ToList();
-
-                if (visibleControls.Count == 0)
-                {
-                    lblStatus.Text = "ℹ️ 추가할 새로운 화면 컨트롤이 없습니다.";
-                    return;
-                }
-
-                foreach (var el in visibleControls)
-                {
-                    var co = page.Callouts.FirstOrDefault(c => c.ElementId == el.Id);
-                    int? calloutNum = co != null ? (int?)co.Number : null;
-                    string stateNote = el.IsEnabled ? "" : " (조건 충족 시 활성화)";
-                    bindingList.Add(new ControlDesc
-                    {
-                        Callout = calloutNum,
-                        Name = el.DisplayLabel,
-                        Description = $"{el.ControlType} 컨트롤{stateNote}",
-                        ElementId = el.Id
-                    });
-                }
-                syncAndRefresh();
-                updateCardFromSelection();
-                lblStatus.Text = $"✅ 화면 컨트롤 {visibleControls.Count}개 추가 완료";
-            };
 
             btnAddCtrl.Click += (s, e) =>
             {
@@ -1720,7 +1996,7 @@ namespace AIAssistant
 
         // ── Main Action Handlers ──
 
-        // ── Capture (Batch or Screen) ──
+        // ── Capture (Batch) ──
         private async void BtnCapture_Click(object sender, EventArgs e)
         {
             if (cmbProcess.SelectedIndex < 0 || _processes.Count == 0)
@@ -1728,185 +2004,108 @@ namespace AIAssistant
 
             var proc = _processes[cmbProcess.SelectedIndex];
 
-            // 1) View-Centric Mode: Crawl registered XML pages
-            if (cmbMode.SelectedIndex == 0)
+            if (_project == null)
             {
-                if (_project == null)
-                {
-                    MessageBox.Show("먼저 📂 Open XML 버튼으로 UI XML 파일을 열어주세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-
-                var pagesToCap = _project.IncludedPages().Where(p => p.HasView).ToList();
-                if (pagesToCap.Count == 0)
-                {
-                    MessageBox.Show("접근할 View가 등록된 페이지가 없습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-
-                _cts?.Dispose();
-                _cts = new CancellationTokenSource();
-                SetBusy(true, $"🔍 {pagesToCap.Count}개 등록된 View 자동 접근 및 캡처 중...");
-                FindBtn("btnCancel").Enabled = true;
-
-                int done = 0;
-                try
-                {
-                    foreach (var p in pagesToCap)
-                    {
-                        _cts.Token.ThrowIfCancellationRequested();
-                        lblStatus.Text = $"🎯 접근 중 ({++done}/{pagesToCap.Count}): {p.PathText}";
-                        await Task.Run(() =>
-                        {
-                            ViewNavigator.NavigateTo(proc.Hwnd, p.NavPath, _project.NavDelayMs, _cts.Token);
-                            string xamlText = File.Exists(p.ViewXamlPath) ? File.ReadAllText(p.ViewXamlPath) : null;
-                            ViewNavigator.CaptureInto(p, proc.Hwnd, _tempDir, _project.AllMenuNames(), xamlText);
-
-                            // Discover and crawl visible sub-tabs inside this view
-                            ViewNavigator.CrawlTabsForPage(p, proc.Hwnd, _tempDir, _project.AllMenuNames(), xamlText,
-                                _cts.Token, msg => BeginInvoke((Action)(() => lblStatus.Text = msg)));
-                        }, _cts.Token);
-                        p.Status = PageStatus.Captured;
-                        UpdateProgress(done, pagesToCap.Count);
-                    }
-
-                    PopulatePagesTree();
-                    if (_selectedPage != null) RenderViewDetail(_selectedPage);
-                    lblStatus.Text = $"✅ {done}개 View 캡처 완료! 이제 ✨ Generate로 LLM 매뉴얼 작성을 진행하세요.";
-                }
-                catch (OperationCanceledException)
-                {
-                    lblStatus.Text = "⏹ 자동 캡처가 취소되었습니다.";
-                }
-                catch (Exception ex)
-                {
-                    lblStatus.Text = $"⚠️ 캡처 중 오류: {ex.Message}";
-                }
-                finally
-                {
-                    SetBusy(false, "");
-                    FindBtn("btnCancel").Enabled = false;
-                }
+                MessageBox.Show("먼저 📂 Open XML 버튼으로 UI XML 파일을 열어주세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
-            // 2) Legacy Screen Mode (Current Screen / Full App)
-            SetBusy(true, "🔍 UI 수집 중...");
-            var mode = cmbMode.SelectedIndex == 2 ? CaptureMode.FullApp : CaptureMode.CurrentScreen;
+            var pagesToCap = _project.IncludedPages().Where(p => p.HasView).ToList();
+            if (pagesToCap.Count == 0)
+            {
+                MessageBox.Show("접근할 View가 등록된 페이지가 없습니다. (체크박스를 확인하세요)", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+            SetBusy(true, $"🔍 {pagesToCap.Count}개 등록된 View 자동 접근 및 캡처 중...");
+            FindBtn("btnCancel").Enabled = true;
+
+            int done = 0;
             try
             {
-                _snapshots = await Task.Run(() =>
+                foreach (var p in pagesToCap)
                 {
-                    if (mode == CaptureMode.CurrentScreen)
+                    _cts.Token.ThrowIfCancellationRequested();
+                    lblStatus.Text = $"🎯 접근 중 ({++done}/{pagesToCap.Count}): {p.PathText}";
+                    await Task.Run(() =>
                     {
-                        var snap = UiInspector.CaptureCurrentScreen(proc.Hwnd, _tempDir);
-                        return snap == null ? null : new List<WindowSnapshot> { snap };
-                    }
-                    return UiInspector.CaptureFullApp(proc.Hwnd, _tempDir,
-                        msg => BeginInvoke((Action)(() => lblStatus.Text = msg)));
-                });
+                        ViewNavigator.NavigateTo(proc.Hwnd, p.NavPath, _project.NavDelayMs, _cts.Token);
+                        string xamlText = File.Exists(p.ViewXamlPath) ? File.ReadAllText(p.ViewXamlPath) : null;
+                        ViewNavigator.CaptureInto(p, proc.Hwnd, _tempDir, _project.AllMenuNames(), xamlText);
 
-                if (_snapshots == null || _snapshots.Count == 0)
-                { lblStatus.Text = "⚠️ UI 요소를 수집하지 못했습니다."; SetBusy(false, ""); return; }
-
-                // Source analysis
-                string solDir = GetSolutionDirectory();
-                _sourceAnalyzer = new SourceAnalyzer(solDir);
-                if (!string.IsNullOrEmpty(solDir))
-                {
-                    lblStatus.Text = "📁 소스 분석 중...";
-                    await Task.Run(() => _sourceAnalyzer.BuildIndex());
+                        // Discover and crawl visible sub-tabs inside this view
+                        ViewNavigator.CrawlTabsForPage(p, proc.Hwnd, _tempDir, _project.AllMenuNames(), xamlText,
+                            _cts.Token, msg => BeginInvoke((Action)(() => lblStatus.Text = msg)));
+                    }, _cts.Token);
+                    p.Status = PageStatus.Captured;
+                    UpdateProgress(done, pagesToCap.Count);
                 }
 
-                // Build document
-                var mapper = new UiSourceMapper(_sourceAnalyzer);
-                _document = mapper.BuildDocument(_snapshots, solDir, proc.Name);
-
-                // Propagate raw screenshot paths to blocks
-                foreach (var block in _document.Blocks.Where(b => b.Type == ManualBlockType.Screenshot))
-                {
-                    var snap = _snapshots.FirstOrDefault(sn =>
-                        sn.WindowTitle == block.WindowName &&
-                        (sn.TabContext ?? "") == (block.TabContext ?? ""));
-                    if (snap != null)
-                        block.RawScreenshotPath = snap.ScreenshotPath;
-                }
-
-                RenderCards();
-                SetBusy(false, $"✅ {_snapshots.Count}개 화면, {_document.Elements.Count}개 UI 요소. ✨ Generate를 클릭하세요.");
+                PopulatePagesTree();
+                if (_selectedPage != null) RenderViewDetail(_selectedPage);
+                lblStatus.Text = $"✅ {done}개 View 캡처 완료! 이제 ✨ Generate로 LLM 매뉴얼 작성을 진행하세요.";
                 FindBtn("btnGenerate").Enabled = true;
+                FindBtn("btnExport").Enabled = true;
+                FindBtn("btnExportHtml").Enabled = true;
+            }
+            catch (OperationCanceledException)
+            {
+                lblStatus.Text = "⏹ 자동 캡처가 취소되었습니다.";
             }
             catch (Exception ex)
             {
-                lblStatus.Text = $"⚠️ 캡처 오류: {ex.Message}";
+                lblStatus.Text = $"⚠️ 캡처 중 오류: {ex.Message}";
+            }
+            finally
+            {
                 SetBusy(false, "");
+                FindBtn("btnCancel").Enabled = false;
             }
         }
 
         // ── Generate (Batch) ──
         private async void BtnGenerate_Click(object sender, EventArgs e)
         {
-            _cts?.Dispose();
-            _cts = new CancellationTokenSource();
-            FindBtn("btnCancel").Enabled = true;
-
-            // View-Centric mode
-            if (cmbMode.SelectedIndex == 0 && _project != null)
+            if (_project == null)
             {
-                var pagesToGen = _project.IncludedPages().Where(p => p.HasScreenshot || p.HasSource).ToList();
-                if (pagesToGen.Count == 0)
-                {
-                    MessageBox.Show("생성할 페이지가 없습니다. (캡처 또는 소스가 있는 페이지 필요)", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-
-                SetBusy(true, $"✨ {pagesToGen.Count}개 페이지 매뉴얼 LLM 생성 중...");
-                int done = 0;
-                try
-                {
-                    foreach (var p in pagesToGen)
-                    {
-                        _cts.Token.ThrowIfCancellationRequested();
-                        lblStatus.Text = $"✨ LLM 작성 중 ({++done}/{pagesToGen.Count}): {p.DisplayName}";
-                        await _viewGenerator.GenerateAsync(_project, p, _cts.Token);
-                        UpdateProgress(done, pagesToGen.Count);
-                    }
-
-                    PopulatePagesTree();
-                    if (_selectedPage != null) RenderViewDetail(_selectedPage);
-                    lblStatus.Text = $"✅ {done}개 페이지 매뉴얼 생성 완료! 내용을 확인/수정한 뒤 📄 Export DOCX를 클릭하세요.";
-                    FindBtn("btnExport").Enabled = true;
-                    FindBtn("btnExportHtml").Enabled = true;
-                }
-                catch (OperationCanceledException)
-                { lblStatus.Text = "⏹ 생성이 취소됐습니다."; }
-                catch (Exception ex)
-                { lblStatus.Text = $"⚠️ 생성 오류: {ex.Message}"; }
-                finally
-                {
-                    SetBusy(false, "");
-                    FindBtn("btnCancel").Enabled = false;
-                }
+                MessageBox.Show("먼저 📂 Open XML 버튼으로 매뉴얼 프로젝트를 준비해주세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
-            // Legacy Document mode
-            if (_document == null) return;
-            SetBusy(true, "✨ LLM 매뉴얼 생성 중...");
+            var pagesToGen = _project.IncludedPages().Where(p => p.HasScreenshot || p.HasSource).ToList();
+            if (pagesToGen.Count == 0)
+            {
+                MessageBox.Show("생성할 페이지가 없습니다. (캡처 또는 소스가 있는 페이지 필요)", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+            FindBtn("btnCancel").Enabled = true;
+            SetBusy(true, $"✨ {pagesToGen.Count}개 페이지 매뉴얼 LLM 생성 중...");
+            int done = 0;
             try
             {
-                await _generator.GenerateAllAsync(_document, _cts.Token);
-                RenderCards();
-                SetBusy(false, "✅ 매뉴얼 생성 완료. 각 카드에서 내용을 확인/편집 후 📄 Export DOCX를 클릭하세요.");
+                foreach (var p in pagesToGen)
+                {
+                    _cts.Token.ThrowIfCancellationRequested();
+                    lblStatus.Text = $"✨ LLM 작성 중 ({++done}/{pagesToGen.Count}): {p.DisplayName}";
+                    await _viewGenerator.GenerateAsync(_project, p, _cts.Token);
+                    UpdateProgress(done, pagesToGen.Count);
+                }
+
+                PopulatePagesTree();
+                if (_selectedPage != null) RenderViewDetail(_selectedPage);
+                lblStatus.Text = $"✅ {done}개 페이지 매뉴얼 생성 완료! 내용을 확인/수정한 뒤 📄 Export DOCX를 클릭하세요.";
                 FindBtn("btnExport").Enabled = true;
                 FindBtn("btnExportHtml").Enabled = true;
             }
             catch (OperationCanceledException)
             { lblStatus.Text = "⏹ 생성이 취소됐습니다."; }
             catch (Exception ex)
-            { lblStatus.Text = $"⚠️ 오류: {ex.Message}"; }
+            { lblStatus.Text = $"⚠️ 생성 오류: {ex.Message}"; }
             finally
             {
                 SetBusy(false, "");
@@ -2004,63 +2203,23 @@ namespace AIAssistant
         // ── Export (DOCX) ──
         private void BtnExport_Click(object sender, EventArgs e)
         {
-            if (cmbMode.SelectedIndex == 0 && _project != null)
+            if (_project == null)
             {
-                using (var dlg = new SaveFileDialog
-                {
-                    Title = "매뉴얼 Word 내보내기",
-                    Filter = "Word Document (*.docx)|*.docx",
-                    FileName = $"{_project.AppName}_Manual_{DateTime.Now:yyyyMMdd}.docx"
-                })
-                {
-                    if (dlg.ShowDialog() != DialogResult.OK) return;
-                    try
-                    {
-                        ManualExporter.ExportProject(_project, dlg.FileName, _tempDir);
-                        lblStatus.Text = $"✅ DOCX 저장 완료: {Path.GetFileName(dlg.FileName)}";
-                        if (MessageBox.Show("Word 파일을 열겠습니까?", "완료",
-                            MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-                            System.Diagnostics.Process.Start(dlg.FileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"내보내기 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                }
+                MessageBox.Show("내보낼 매뉴얼 프로젝트가 없습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
-            }
-
-            if (_document == null) return;
-
-            // Before export, re-annotate screenshots with current callout state
-            foreach (var block in _document.Blocks.Where(b => b.Type == ManualBlockType.Screenshot))
-            {
-                var snap = _snapshots?.FirstOrDefault(sn =>
-                    sn.WindowTitle == block.WindowName &&
-                    (sn.TabContext ?? "") == (block.TabContext ?? ""));
-
-                if (snap != null && !string.IsNullOrEmpty(snap.ScreenshotPath))
-                {
-                    string tag = $"export_{block.Id}";
-                    string annotated = ScreenCaptureEngine.AnnotateScreenshot(
-                        snap.ScreenshotPath,
-                        block.ShowCallouts ? block.Callouts : null,
-                        snap.WindowRect, _tempDir, tag);
-                    block.ScreenshotPath = annotated;
-                }
             }
 
             using (var dlg = new SaveFileDialog
             {
-                Title = "매뉴얼 저장",
+                Title = "매뉴얼 Word 내보내기",
                 Filter = "Word Document (*.docx)|*.docx",
-                FileName = $"{_document.ApplicationName}_Manual_{DateTime.Now:yyyyMMdd}.docx"
+                FileName = $"{_project.AppName}_Manual_{DateTime.Now:yyyyMMdd}.docx"
             })
             {
                 if (dlg.ShowDialog() != DialogResult.OK) return;
                 try
                 {
-                    ManualExporter.ExportDocx(_document, dlg.FileName);
+                    ManualExporter.ExportProject(_project, dlg.FileName, _tempDir);
                     lblStatus.Text = $"✅ DOCX 저장 완료: {Path.GetFileName(dlg.FileName)}";
                     if (MessageBox.Show("Word 파일을 열겠습니까?", "완료",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
@@ -2068,8 +2227,7 @@ namespace AIAssistant
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"저장 오류:\n{ex.Message}", "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show($"내보내기 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
